@@ -1,85 +1,84 @@
-import { App, Editor, MarkdownView, Modal, Notice, Plugin, PluginSettingTab, Setting } from 'obsidian';
+import { App, ItemView, MarkdownRenderer, Notice, Plugin, PluginSettingTab, Setting, WorkspaceLeaf, requestUrl, setIcon, ButtonComponent, TextAreaComponent } from 'obsidian';
 
-// Remember to rename these classes and interfaces!
+// ----------------------------------------------------------------
+// Settings & Constants
+// ----------------------------------------------------------------
 
-interface MyPluginSettings {
-	mySetting: string;
+interface GeminiPluginSettings {
+	apiKey: string;
+	modelName: string;
+	thinkingLevel: 'low' | 'high';
 }
 
-const DEFAULT_SETTINGS: MyPluginSettings = {
-	mySetting: 'default'
+const DEFAULT_SETTINGS: GeminiPluginSettings = {
+	apiKey: '',
+	modelName: 'gemini-3-pro-preview',
+	thinkingLevel: 'high'
 }
 
-export default class MyPlugin extends Plugin {
-	settings: MyPluginSettings;
+const VIEW_TYPE_GEMINI_CHAT = 'gemini-chat-view';
+
+// ----------------------------------------------------------------
+// Main Plugin Class
+// ----------------------------------------------------------------
+
+export default class GeminiPlugin extends Plugin {
+	settings: GeminiPluginSettings;
+	view: GeminiChatView;
 
 	async onload() {
 		await this.loadSettings();
 
-		// This creates an icon in the left ribbon.
-		const ribbonIconEl = this.addRibbonIcon('dice', 'Sample Plugin', (_evt: MouseEvent) => {
-			// Called when the user clicks the icon.
-			new Notice('This is a notice!');
+		// Register the Chat View
+		this.registerView(
+			VIEW_TYPE_GEMINI_CHAT,
+			(leaf) => (this.view = new GeminiChatView(leaf, this))
+		);
+
+		// Add Ribbon Icon to open Chat
+		this.addRibbonIcon('bot', 'Open Gemini Chat', () => {
+			this.activateView();
 		});
-		// Perform additional things with the ribbon
-		ribbonIconEl.addClass('my-plugin-ribbon-class');
 
-		// This adds a status bar item to the bottom of the app. Does not work on mobile apps.
-		const statusBarItemEl = this.addStatusBarItem();
-		statusBarItemEl.setText('Status Bar Text');
-
-		// This adds a simple command that can be triggered anywhere
+		// Add Command
 		this.addCommand({
-			id: 'open-sample-modal-simple',
-			name: 'Open sample modal (simple)',
+			id: 'open-gemini-chat',
+			name: 'Open Gemini Chat',
 			callback: () => {
-				new SampleModal(this.app).open();
-			}
-		});
-		// This adds an editor command that can perform some operation on the current editor instance
-		this.addCommand({
-			id: 'sample-editor-command',
-			name: 'Sample editor command',
-			editorCallback: (editor: Editor, _view: MarkdownView) => {
-				console.log(editor.getSelection());
-				editor.replaceSelection('Sample Editor Command');
-			}
-		});
-		// This adds a complex command that can check whether the current state of the app allows execution of the command
-		this.addCommand({
-			id: 'open-sample-modal-complex',
-			name: 'Open sample modal (complex)',
-			checkCallback: (checking: boolean) => {
-				// Conditions to check
-				const markdownView = this.app.workspace.getActiveViewOfType(MarkdownView);
-				if (markdownView) {
-					// If checking is true, we're simply "checking" if the command can be run.
-					// If checking is false, then we want to actually perform the operation.
-					if (!checking) {
-						new SampleModal(this.app).open();
-					}
-
-					// This command will only show up in Command Palette when the check function returns true
-					return true;
-				}
+				this.activateView();
 			}
 		});
 
-		// This adds a settings tab so the user can configure various aspects of the plugin
-		this.addSettingTab(new SampleSettingTab(this.app, this));
-
-		// If the plugin hooks up any global DOM events (on parts of the app that doesn't belong to this plugin)
-		// Using this function will automatically remove the event listener when this plugin is disabled.
-		this.registerDomEvent(document, 'click', (evt: MouseEvent) => {
-			console.log('click', evt);
-		});
-
-		// When registering intervals, this function will automatically clear the interval when the plugin is disabled.
-		this.registerInterval(window.setInterval(() => console.log('setInterval'), 5 * 60 * 1000));
+		// Add Settings Tab
+		this.addSettingTab(new GeminiSettingTab(this.app, this));
 	}
 
 	onunload() {
+		// View is automatically detached
+	}
 
+	async activateView() {
+		const { workspace } = this.app;
+
+		let leaf: WorkspaceLeaf | null = null;
+		const leaves = workspace.getLeavesOfType(VIEW_TYPE_GEMINI_CHAT);
+
+		if (leaves.length > 0) {
+			// A leaf with our view already exists, use that
+			leaf = leaves[0];
+		} else {
+			// Our view could not be found in the workspace, create a new leaf
+			// in the right sidebar
+			const rightLeaf = workspace.getRightLeaf(false);
+            if (rightLeaf) {
+                leaf = rightLeaf;
+			    await leaf.setViewState({ type: VIEW_TYPE_GEMINI_CHAT, active: true });
+            }
+		}
+
+		if (leaf) {
+			workspace.revealLeaf(leaf);
+		}
 	}
 
 	async loadSettings() {
@@ -91,43 +90,270 @@ export default class MyPlugin extends Plugin {
 	}
 }
 
-class SampleModal extends Modal {
-	constructor(app: App) {
-		super(app);
+// ----------------------------------------------------------------
+// Chat View
+// ----------------------------------------------------------------
+
+interface ChatMessage {
+	role: 'user' | 'model';
+	text: string;
+	parts?: any[]; // Store raw parts for API history (includes thoughtSignature)
+}
+
+class GeminiChatView extends ItemView {
+	plugin: GeminiPlugin;
+	messagesContainer: HTMLElement;
+	inputTextArea: TextAreaComponent;
+	history: ChatMessage[] = [];
+
+	constructor(leaf: WorkspaceLeaf, plugin: GeminiPlugin) {
+		super(leaf);
+		this.plugin = plugin;
 	}
 
-	onOpen() {
-		const {contentEl} = this;
-		contentEl.setText('Woah!');
+	getViewType() {
+		return VIEW_TYPE_GEMINI_CHAT;
 	}
 
-	onClose() {
-		const {contentEl} = this;
-		contentEl.empty();
+	getDisplayText() {
+		return 'Gemini Copilot';
+	}
+
+	getIcon() {
+		return 'bot';
+	}
+
+	async onload() {
+		super.onload();
+		this.addAction('trash', 'Clear Chat', () => {
+			this.history = [];
+			this.messagesContainer.empty();
+			this.addMessage({ role: 'model', text: 'Chat cleared.' });
+		});
+	}
+
+	async onOpen() {
+		const container = this.containerEl.children[1];
+		container.empty();
+		container.addClass('gemini-chat-view');
+
+		// 1. Messages Area
+		this.messagesContainer = container.createDiv({ cls: 'gemini-chat-messages' });
+		
+		// Initial Welcome Message
+		this.addMessage({ role: 'model', text: 'Hello! I am Gemini. How can I help you with your notes today?' });
+
+		// 2. Input Area
+		const inputContainer = container.createDiv({ cls: 'gemini-chat-input-container' });
+
+		this.inputTextArea = new TextAreaComponent(inputContainer);
+		this.inputTextArea.inputEl.addClass('gemini-chat-input');
+		this.inputTextArea.setPlaceholder('Ask Gemini...');
+		
+		// Handle Enter key to send
+		this.inputTextArea.inputEl.addEventListener('keydown', (e) => {
+			if (e.key === 'Enter' && !e.shiftKey) {
+				e.preventDefault();
+				this.handleSend();
+			}
+		});
+
+		const sendBtn = new ButtonComponent(inputContainer);
+		sendBtn.setIcon('send');
+		sendBtn.setClass('gemini-chat-send-btn');
+		sendBtn.onClick(() => this.handleSend());
+	}
+
+	async handleSend() {
+		const text = this.inputTextArea.getValue().trim();
+		if (!text) return;
+
+		if (!this.plugin.settings.apiKey) {
+			new Notice('Please set your Gemini API Key in settings.');
+			return;
+		}
+
+		// Clear input
+		this.inputTextArea.setValue('');
+
+		// Add User Message
+		const userMsg: ChatMessage = { 
+			role: 'user', 
+			text: text,
+			parts: [{ text: text }] 
+		};
+		this.addMessage(userMsg);
+        this.history.push(userMsg);
+
+		// Show Loading
+		const loadingEl = this.messagesContainer.createDiv({ cls: 'gemini-chat-loading' });
+		loadingEl.setText('Gemini is thinking...');
+		this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+
+		try {
+			// Call API
+			const responseMsg = await this.callGeminiAPI(this.history);
+			
+			// Remove Loading
+			loadingEl.remove();
+
+			// Add Model Message
+			this.addMessage(responseMsg);
+            this.history.push(responseMsg);
+
+		} catch (error) {
+			console.error('Gemini Error:', error);
+			loadingEl.setText(`Error: ${error.message}`);
+			new Notice(`Gemini Error: ${error.message}`);
+		}
+	}
+
+	async addMessage(msg: ChatMessage) {
+		const msgEl = this.messagesContainer.createDiv({ cls: `gemini-chat-message ${msg.role}` });
+		
+		// Render Main Message
+		await MarkdownRenderer.render(
+			this.app,
+			msg.text,
+			msgEl,
+			'',
+			this
+		);
+
+		this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
+	}
+
+	async callGeminiAPI(history: ChatMessage[]): Promise<ChatMessage> {
+		const { apiKey, modelName, thinkingLevel } = this.plugin.settings;
+		// Use v1alpha for preview features like thinking_level
+		const url = `https://generativelanguage.googleapis.com/v1alpha/models/${modelName}:generateContent`;
+
+		// Format history for API
+		// API expects: { role: "user"|"model", parts: [{ text: "..." }, { thoughtSignature: "..." }] }
+		const contents = history.map(msg => ({
+			role: msg.role,
+			parts: msg.parts || [{ text: msg.text }]
+		}));
+
+		const body = {
+			contents: contents,
+			generationConfig: {
+				thinkingConfig: {
+					includeThoughts: true,
+					thinkingLevel: thinkingLevel
+				}
+			}
+		};
+
+		const response = await requestUrl({
+			url: url,
+			method: 'POST',
+			headers: {
+				'Content-Type': 'application/json',
+				'x-goog-api-key': apiKey
+			},
+			body: JSON.stringify(body),
+			throw: false
+		});
+
+		if (response.status >= 400) {
+			console.error('Gemini API Error Body:', response.text);
+			throw new Error(`API Error ${response.status}: ${response.text}`);
+		}
+
+		const data = response.json;
+		
+		// Extract parts from response to preserve thoughtSignature
+		if (data.candidates && data.candidates.length > 0 && data.candidates[0].content) {
+			const content = data.candidates[0].content;
+			
+            // Identify parts
+            // Thought parts usually have "thought": true (boolean) in the part object in v1alpha
+            // Response text is in a part with "text" and NO "thought": true
+            
+			// Find the main response text part (first part that has text and is NOT a thought)
+            // If no such part found, fallback to any text part
+			const textPart = content.parts.find((p: any) => p.text && p.thought !== true);
+            const thoughtPart = content.parts.find((p: any) => p.thought === true);
+            
+            let text = "";
+            if (textPart) {
+                text = textPart.text;
+            } else if (thoughtPart && !textPart) {
+                 // Only thoughts returned?
+                 text = "(Thinking process only, no final response generated)";
+            } else {
+                text = "(No response text generated)";
+            }
+			
+			return {
+				role: 'model',
+				text: text,
+				parts: content.parts // Store all parts including signatures and thoughts
+			};
+		} else {
+            return {
+				role: 'model',
+				text: "(No response text generated)",
+				parts: [{ text: "(No response text generated)" }]
+			};
+        }
+	}
+
+	async onClose() {
+		// cleanup
 	}
 }
 
-class SampleSettingTab extends PluginSettingTab {
-	plugin: MyPlugin;
+// ----------------------------------------------------------------
+// Settings Tab
+// ----------------------------------------------------------------
 
-	constructor(app: App, plugin: MyPlugin) {
+class GeminiSettingTab extends PluginSettingTab {
+	plugin: GeminiPlugin;
+
+	constructor(app: App, plugin: GeminiPlugin) {
 		super(app, plugin);
 		this.plugin = plugin;
 	}
 
 	display(): void {
-		const {containerEl} = this;
-
+		const { containerEl } = this;
 		containerEl.empty();
 
+		containerEl.createEl('h2', { text: 'Gemini Copilot Settings' });
+
 		new Setting(containerEl)
-			.setName('Setting #1')
-			.setDesc('It\'s a secret')
+			.setName('API Key')
+			.setDesc('Enter your Google Gemini API Key')
 			.addText(text => text
-				.setPlaceholder('Enter your secret')
-				.setValue(this.plugin.settings.mySetting)
+				.setPlaceholder('AIzaSy...')
+				.setValue(this.plugin.settings.apiKey)
 				.onChange(async (value) => {
-					this.plugin.settings.mySetting = value;
+					this.plugin.settings.apiKey = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Model Name')
+			.setDesc('The Gemini model to use (e.g., gemini-3-pro-preview)')
+			.addText(text => text
+				.setPlaceholder('gemini-3-pro-preview')
+				.setValue(this.plugin.settings.modelName)
+				.onChange(async (value) => {
+					this.plugin.settings.modelName = value;
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Thinking Level')
+			.setDesc('Controls the depth of reasoning. "High" is default for Gemini 3 Pro.')
+			.addDropdown(dropdown => dropdown
+				.addOption('high', 'High')
+				.addOption('low', 'Low')
+				.setValue(this.plugin.settings.thinkingLevel)
+				.onChange(async (value) => {
+					this.plugin.settings.thinkingLevel = value as 'low' | 'high';
 					await this.plugin.saveSettings();
 				}));
 	}
