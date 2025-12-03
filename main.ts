@@ -3,6 +3,7 @@ import { NoteService } from './note-service';
 import { ChatHistoryService, ChatMessage as HistoryChatMessage } from './chat-history-service';
 import { ChatHistoryModal } from './chat-history-modal';
 import { FileSuggestModal } from './file-suggest-modal';
+import { GeminiFileManager } from './gemini-file-manager';
 
 // ----------------------------------------------------------------
 // Settings & Constants
@@ -124,6 +125,7 @@ interface GeminiChatMessage {
 	role: 'user' | 'model';
 	content: string; // Renamed from 'text' to 'content' to match HistoryChatMessage
 	parts?: any[];
+    usageMetadata?: { promptTokenCount: number; candidatesTokenCount: number; totalTokenCount: number };
 }
 
 class GeminiChatView extends ItemView {
@@ -137,6 +139,7 @@ class GeminiChatView extends ItemView {
 	history: GeminiChatMessage[] = [];
     noteService: NoteService;
     chatHistoryService: ChatHistoryService;
+    fileManager: GeminiFileManager;
     currentChatFile: string | null = null;
     
     // Context State
@@ -148,6 +151,7 @@ class GeminiChatView extends ItemView {
 		this.plugin = plugin;
         this.noteService = new NoteService(plugin.app);
         this.chatHistoryService = new ChatHistoryService(plugin.app);
+        this.fileManager = new GeminiFileManager(plugin.app);
 	}
 
 	getViewType() {
@@ -390,7 +394,8 @@ class GeminiChatView extends ItemView {
 
 	async handleSend() {
 		const text = this.inputTextArea.getValue().trim();
-		if (!text) return;
+        // Allow sending if there are files attached even if text is empty (e.g. "describe this image")
+		if (!text && this.contextFiles.length === 0 && !this.isActiveContextEnabled) return;
 
 		if (!this.plugin.settings.apiKey) {
 			new Notice('Please set your Gemini API Key in settings.');
@@ -400,78 +405,91 @@ class GeminiChatView extends ItemView {
 		// Clear input
 		this.inputTextArea.setValue('');
 
-		// Add User Message
-		const userMsg: GeminiChatMessage = {
-			role: 'user',
-			content: text,
-			parts: [{ text: text }]
-		};
-		this.addMessage(userMsg);
+        // Prepare User Message Parts
+        const messageParts: any[] = [];
+        let contextText = "";
 
-        // Build Context String
-        let contextContent = "";
-        
-        // 1. Active File Context
+        // Helper to process file
+        const processFile = async (file: TFile, label: string) => {
+            if (this.fileManager.isMediaFile(file)) {
+                // Upload Media
+                try {
+                    const fileUri = await this.fileManager.uploadFile(file, this.plugin.settings.apiKey);
+                    const mimeType = this.fileManager.getMimeType(file.extension) || 'application/octet-stream';
+                    messageParts.push({
+                        file_data: {
+                            mime_type: mimeType,
+                            file_uri: fileUri
+                        }
+                    });
+                    new Notice(`Uploaded ${file.basename}`);
+                } catch (err) {
+                    console.error(`Failed to upload ${file.path}:`, err);
+                    new Notice(`Failed to upload ${file.basename}: ${err.message}`);
+                }
+            } else {
+                // Read Text
+                try {
+                    const content = await this.app.vault.read(file);
+                    contextText += `\n\n--- Content of ${label} [[${file.path}]] ---\n${content}\n--- End of ${label} ---\n`;
+                } catch (err) {
+                    console.error(`Failed to read ${file.path}:`, err);
+                }
+            }
+        };
+
+        // 1. Process Active File
         if (this.isActiveContextEnabled) {
             const activeFile = this.app.workspace.getActiveFile();
-            if (activeFile && activeFile.extension === 'md') {
-                const content = await this.app.vault.read(activeFile);
-                contextContent += `
-
---- Content of Active File [[${activeFile.path}]] ---
-${content}
---- End of Active File ---
-`;
+            if (activeFile) {
+                await processFile(activeFile, "Active File");
             }
         }
 
-        // 2. Manual Context Files
+        // 2. Process Manual Context Files
         for (const file of this.contextFiles) {
-             const content = await this.app.vault.read(file);
-             contextContent += `
-
---- Content of Selected File [[${file.path}]] ---
-${content}
---- End of Selected File ---
-`;
+             await processFile(file, "Selected File");
         }
 
-        // 3. Inline Links (Existing logic)
-        const linkRegex = /\`\[\[([^\]]+)\]\]\`\]/g;
-        const matches = Array.from(text.matchAll(linkRegex));
-
-        if (matches.length > 0) {
-            new Notice(`Reading ${matches.length} linked file(s)...`, 3000);
-            
-            for (const match of matches) {
-                const linkContent = match[1];
-                const cleanLink = linkContent.split('|')[0];
-
-                const resolution = await this.noteService.resolveNoteFile(cleanLink);
-                if (resolution.type === 'resolved') {
-                    const content = await this.noteService.readNoteText(resolution.file);
-                    contextContent += `
-
---- Content of Linked File [[${cleanLink}]] ---
-${content}
---- End of Linked File ---
-`;
-                } else if (resolution.type === 'not_unique') {
-                     contextContent += `
-
---- Ambiguous link [[${cleanLink}]] (matches multiple files) ---`;
-                } else {
-                    contextContent += `
-
---- Could not resolve [[${cleanLink}]] ---`;
+        // 3. Process Inline Links (Text only for now, unless we want to recurse upload?)
+        // Keeping existing link logic for text notes
+        if (text) {
+            const linkRegex = /\[\[([^\]]+)\]\]/g;
+            const matches = Array.from(text.matchAll(linkRegex));
+            if (matches.length > 0) {
+                new Notice(`Reading ${matches.length} linked text note(s)...`);
+                for (const match of matches) {
+                    const linkContent = match[1];
+                    const cleanLink = linkContent.split('|')[0];
+                    const resolution = await this.noteService.resolveNoteFile(cleanLink);
+                    if (resolution.type === 'resolved') {
+                        const content = await this.noteService.readNoteText(resolution.file);
+                        contextText += `\n\n--- Content of Linked Note [[${cleanLink}]] ---\n${content}\n--- End of Linked Note ---\n`;
+                    }
                 }
             }
         }
 
-        // Append context to message parts for the API
-        if (contextContent) {
-            userMsg.parts = [{ text: text + "\n\n" + contextContent }];
+        // Final Assembly
+        // Combine user text + context text into one text part
+        const finalUserText = (text + "\n" + contextText).trim();
+        
+        if (finalUserText) {
+            messageParts.push({ text: finalUserText });
         }
+
+        if (messageParts.length === 0) {
+            new Notice("No content to send.");
+            return;
+        }
+
+		// Add User Message
+		const userMsg: GeminiChatMessage = {
+			role: 'user',
+			content: text || (this.contextFiles.length > 0 ? `[Sent ${this.contextFiles.length} file(s)]` : "[Empty message]"),
+			parts: messageParts
+		};
+		this.addMessage(userMsg);
 
         this.history.push(userMsg);
         
@@ -537,6 +555,12 @@ ${content}
 			this
 		);
 
+        // Render Usage Metadata if available (only for model messages usually)
+        if (msg.usageMetadata) {
+            const metaEl = msgEl.createDiv({ cls: 'gemini-chat-meta', attr: { style: 'font-size: 0.75em; color: var(--text-muted); margin-top: 5px; text-align: right;' } });
+            metaEl.setText(`Tokens: ${msg.usageMetadata.totalTokenCount} (In: ${msg.usageMetadata.promptTokenCount}, Out: ${msg.usageMetadata.candidatesTokenCount})`);
+        }
+
 		this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
 	}
 
@@ -583,6 +607,7 @@ ${content}
 		// Extract parts from response to preserve thoughtSignature
 		if (data.candidates && data.candidates.length > 0 && data.candidates[0].content) {
 			const content = data.candidates[0].content;
+			const usageMetadata = data.usageMetadata;
 			
             // Identify parts
             // Thought parts usually have "thought": true (boolean) in the part object in v1alpha
@@ -606,7 +631,8 @@ ${content}
 			return {
 				role: 'model',
 				content: responseContent,
-				parts: content.parts // Store all parts including signatures and thoughts
+				parts: content.parts, // Store all parts including signatures and thoughts
+                usageMetadata: usageMetadata
 			};
 		} else {
             return {
@@ -653,7 +679,7 @@ class GeminiSettingTab extends PluginSettingTab {
 
 		new Setting(containerEl)
 			.setName('Model Name')
-			.setDesc('The Gemini model to use (e.g., gemini-3-pro-preview)')
+			.setDesc('The Gemini model to use (e.g., gemini-3-pro-preview, gemini-3-pro-image-preview)')
 			.addText(text => text
 				.setPlaceholder('gemini-3-pro-preview')
 				.setValue(this.plugin.settings.modelName)

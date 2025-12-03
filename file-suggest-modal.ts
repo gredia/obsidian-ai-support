@@ -9,7 +9,13 @@ export class FileSuggestModal extends FuzzySuggestModal<TFile> {
     }
 
     getItems(): TFile[] {
-        return this.app.vault.getMarkdownFiles();
+        const supportedExtensions = new Set([
+            'md', 'txt', 'csv', 'js', 'py', 'html', 'css', 'xml', 'json', // Text
+            'png', 'jpg', 'jpeg', 'webp', 'heic', 'heif', // Images
+            'pdf', // Documents
+            'mp3', 'wav', 'aac', 'mp4', 'mpeg', 'mov', 'avi', 'flv', 'mpg', 'webm', 'wmv', '3gpp' // Audio/Video
+        ]);
+        return this.app.vault.getFiles().filter(f => supportedExtensions.has(f.extension.toLowerCase()));
     }
 
     getItemText(file: TFile): string {
