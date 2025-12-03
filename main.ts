@@ -1,4 +1,8 @@
-import { App, ItemView, MarkdownRenderer, Notice, Plugin, PluginSettingTab, Setting, WorkspaceLeaf, requestUrl, setIcon, ButtonComponent, TextAreaComponent } from 'obsidian';
+import { App, ItemView, MarkdownRenderer, Notice, Plugin, PluginSettingTab, Setting, WorkspaceLeaf, requestUrl, setIcon, ButtonComponent, TextAreaComponent, TFile, setTooltip } from 'obsidian';
+import { NoteService } from './note-service';
+import { ChatHistoryService, ChatMessage as HistoryChatMessage } from './chat-history-service';
+import { ChatHistoryModal } from './chat-history-modal';
+import { FileSuggestModal } from './file-suggest-modal';
 
 // ----------------------------------------------------------------
 // Settings & Constants
@@ -8,12 +12,14 @@ interface GeminiPluginSettings {
 	apiKey: string;
 	modelName: string;
 	thinkingLevel: 'low' | 'high';
+	chatHistoryFolder: string;
 }
 
 const DEFAULT_SETTINGS: GeminiPluginSettings = {
 	apiKey: '',
 	modelName: 'gemini-3-pro-preview',
-	thinkingLevel: 'high'
+	thinkingLevel: 'high',
+	chatHistoryFolder: 'Gemini Chats'
 }
 
 const VIEW_TYPE_GEMINI_CHAT = 'gemini-chat-view';
@@ -48,6 +54,26 @@ export default class GeminiPlugin extends Plugin {
 				this.activateView();
 			}
 		});
+
+        // Add History Command
+        this.addCommand({
+            id: 'open-gemini-chat-history',
+            name: 'View Chat History',
+            callback: async () => {
+                const historyService = new ChatHistoryService(this.app);
+                const files = await historyService.getChatFiles(this.settings.chatHistoryFolder);
+                new ChatHistoryModal(this.app, files, async (item) => {
+                    await this.activateView();
+                    if (this.view) {
+                        if (item.type === 'new') {
+                            await this.view.startNewChat();
+                        } else {
+                            await this.view.loadChat(item.file);
+                        }
+                    }
+                }).open();
+            }
+        });
 
 		// Add Settings Tab
 		this.addSettingTab(new GeminiSettingTab(this.app, this));
@@ -94,21 +120,34 @@ export default class GeminiPlugin extends Plugin {
 // Chat View
 // ----------------------------------------------------------------
 
-interface ChatMessage {
+interface GeminiChatMessage {
 	role: 'user' | 'model';
-	text: string;
-	parts?: any[]; // Store raw parts for API history (includes thoughtSignature)
+	content: string; // Renamed from 'text' to 'content' to match HistoryChatMessage
+	parts?: any[];
 }
 
 class GeminiChatView extends ItemView {
 	plugin: GeminiPlugin;
 	messagesContainer: HTMLElement;
 	inputTextArea: TextAreaComponent;
-	history: ChatMessage[] = [];
+    headerContainer: HTMLElement;
+    contextChipsContainer: HTMLElement;
+    activeContextBtn: HTMLElement;
+    
+	history: GeminiChatMessage[] = [];
+    noteService: NoteService;
+    chatHistoryService: ChatHistoryService;
+    currentChatFile: string | null = null;
+    
+    // Context State
+    contextFiles: TFile[] = [];
+    isActiveContextEnabled: boolean = false;
 
 	constructor(leaf: WorkspaceLeaf, plugin: GeminiPlugin) {
 		super(leaf);
 		this.plugin = plugin;
+        this.noteService = new NoteService(plugin.app);
+        this.chatHistoryService = new ChatHistoryService(plugin.app);
 	}
 
 	getViewType() {
@@ -125,44 +164,229 @@ class GeminiChatView extends ItemView {
 
 	async onload() {
 		super.onload();
-		this.addAction('trash', 'Clear Chat', () => {
-			this.history = [];
-			this.messagesContainer.empty();
-			this.addMessage({ role: 'model', text: 'Chat cleared.' });
+		this.addAction('plus-circle', 'Start New Chat', () => {
+            this.startNewChat();
 		});
+        
+        this.addAction('history', 'Chat History', async () => {
+             this.showHistoryModal();
+        });
+        
+        this.addAction('home', 'Home', () => {
+            this.renderWelcomeScreen();
+        });
 	}
 
 	async onOpen() {
-		const container = this.containerEl.children[1];
-		container.empty();
-		container.addClass('gemini-chat-view');
-
-		// 1. Messages Area
-		this.messagesContainer = container.createDiv({ cls: 'gemini-chat-messages' });
-		
-		// Initial Welcome Message
-		this.addMessage({ role: 'model', text: 'Hello! I am Gemini. How can I help you with your notes today?' });
-
-		// 2. Input Area
-		const inputContainer = container.createDiv({ cls: 'gemini-chat-input-container' });
-
-		this.inputTextArea = new TextAreaComponent(inputContainer);
-		this.inputTextArea.inputEl.addClass('gemini-chat-input');
-		this.inputTextArea.setPlaceholder('Ask Gemini...');
-		
-		// Handle Enter key to send
-		this.inputTextArea.inputEl.addEventListener('keydown', (e) => {
-			if (e.key === 'Enter' && !e.shiftKey) {
-				e.preventDefault();
-				this.handleSend();
-			}
-		});
-
-		const sendBtn = new ButtonComponent(inputContainer);
-		sendBtn.setIcon('send');
-		sendBtn.setClass('gemini-chat-send-btn');
-		sendBtn.onClick(() => this.handleSend());
+        await this.renderWelcomeScreen();
 	}
+
+    async showHistoryModal() {
+        const files = await this.chatHistoryService.getChatFiles(this.plugin.settings.chatHistoryFolder);
+        new ChatHistoryModal(this.app, files, (item) => {
+            if (item.type === 'new') {
+                this.startNewChat();
+            } else {
+                this.loadChat(item.file);
+            }
+        }).open();
+    }
+
+    async renderWelcomeScreen() {
+        const container = this.containerEl.children[1];
+        container.empty();
+        container.addClass('gemini-chat-view');
+
+        const contentContainer = container.createDiv({ cls: 'gemini-chat-welcome' });
+        contentContainer.createEl('h2', { text: 'Gemini Copilot' });
+
+        new ButtonComponent(contentContainer)
+            .setButtonText('Start New Chat')
+            .setCta()
+            .onClick(() => {
+                this.startNewChat();
+            });
+
+        contentContainer.createEl('h3', { text: 'Recent Chats' });
+        const historyList = contentContainer.createDiv({ cls: 'gemini-chat-history-list' });
+
+        const files = await this.chatHistoryService.getChatFiles(this.plugin.settings.chatHistoryFolder);
+        
+        if (files.length === 0) {
+            historyList.createEl('div', { text: 'No recent chats found.', cls: 'gemini-history-empty' });
+        } else {
+            const limit = 10;
+            for (const file of files.slice(0, limit)) {
+                const item = historyList.createDiv({ cls: 'gemini-history-item' });
+                item.createDiv({ text: file.basename, cls: 'gemini-history-item-title' });
+                const date = new Date(file.stat.mtime).toLocaleDateString();
+                item.createDiv({ text: date, cls: 'gemini-history-item-date' });
+                
+                item.onClickEvent(() => {
+                    this.loadChat(file);
+                });
+            }
+        }
+    }
+
+    initializeChatUI(container: Element) {
+        container.empty();
+        container.addClass('gemini-chat-view');
+
+        // 0. Header Bar
+        this.headerContainer = container.createDiv({ cls: 'gemini-chat-header' });
+        
+        // Back/Home Button
+        const backBtn = this.headerContainer.createDiv({ cls: 'gemini-header-btn', attr: { title: 'Back to Home' } });
+        setIcon(backBtn, 'home');
+        backBtn.onClickEvent(() => this.renderWelcomeScreen());
+
+        // Title (Clickable for History)
+        const titleEl = this.headerContainer.createDiv({ cls: 'gemini-chat-title', text: 'New Chat' });
+        titleEl.setAttribute('title', 'Click to switch chat');
+        titleEl.onClickEvent(() => this.showHistoryModal());
+
+        // New Chat Button
+        const newBtn = this.headerContainer.createDiv({ cls: 'gemini-header-btn', attr: { title: 'New Chat' } });
+        setIcon(newBtn, 'plus-circle');
+        newBtn.onClickEvent(() => this.startNewChat());
+
+        // 1. Messages Area
+        this.messagesContainer = container.createDiv({ cls: 'gemini-chat-messages' });
+
+        // 2. Footer Area (Context + Input)
+        const footer = container.createDiv({ cls: 'gemini-chat-footer' });
+
+        // Context Chips
+        this.contextChipsContainer = footer.createDiv({ cls: 'gemini-context-chips' });
+        this.renderContextChips(); // Initial render
+
+        // Input Row
+        const inputRow = footer.createDiv({ cls: 'gemini-chat-input-container' });
+
+        // Input Toolbar (Left of input)
+        const toolbar = inputRow.createDiv({ cls: 'gemini-input-toolbar' });
+        
+        // Add File Button
+        const addFileBtn = toolbar.createDiv({ cls: 'gemini-toolbar-btn', attr: { title: 'Add note to context' } });
+        setIcon(addFileBtn, 'file-plus');
+        addFileBtn.onClickEvent(() => {
+            new FileSuggestModal(this.app, (file) => {
+                this.addContextFile(file);
+            }).open();
+        });
+
+        // Active Context Toggle
+        this.activeContextBtn = toolbar.createDiv({ cls: 'gemini-toolbar-btn', attr: { title: 'Toggle active file context' } });
+        setIcon(this.activeContextBtn, 'eye');
+        this.activeContextBtn.onClickEvent(() => {
+            this.isActiveContextEnabled = !this.isActiveContextEnabled;
+            this.renderContextChips();
+        });
+
+        this.inputTextArea = new TextAreaComponent(inputRow);
+        this.inputTextArea.inputEl.addClass('gemini-chat-input');
+        this.inputTextArea.setPlaceholder('Ask Gemini...');
+        
+        // Handle Enter key to send
+        this.inputTextArea.inputEl.addEventListener('keydown', (e) => {
+            if (e.key === 'Enter' && !e.shiftKey) {
+                e.preventDefault();
+                this.handleSend();
+            }
+        });
+
+        const sendBtn = new ButtonComponent(inputRow);
+        sendBtn.setIcon('send');
+        sendBtn.setClass('gemini-chat-send-btn');
+        sendBtn.onClick(() => this.handleSend());
+        
+        return titleEl; 
+    }
+
+    addContextFile(file: TFile) {
+        if (!this.contextFiles.includes(file)) {
+            this.contextFiles.push(file);
+            this.renderContextChips();
+        }
+    }
+
+    removeContextFile(file: TFile) {
+        this.contextFiles = this.contextFiles.filter(f => f !== file);
+        this.renderContextChips();
+    }
+
+    renderContextChips() {
+        if (!this.contextChipsContainer) return;
+        this.contextChipsContainer.empty();
+
+        // Update active context button state
+        if (this.activeContextBtn) {
+            if (this.isActiveContextEnabled) {
+                this.activeContextBtn.addClass('is-active');
+            } else {
+                this.activeContextBtn.removeClass('is-active');
+            }
+        }
+
+        // Render Active File Chip if enabled
+        if (this.isActiveContextEnabled) {
+            const activeChip = this.contextChipsContainer.createDiv({ cls: 'gemini-context-chip is-active-file' });
+            activeChip.createSpan({ text: 'Active Note' });
+            // No remove button for active context (toggled via eye button)
+        }
+
+        // Render Selected Files
+        for (const file of this.contextFiles) {
+            const chip = this.contextChipsContainer.createDiv({ cls: 'gemini-context-chip' });
+            chip.createSpan({ text: file.basename });
+            const removeBtn = chip.createDiv({ cls: 'gemini-context-chip-remove' });
+            setIcon(removeBtn, 'x');
+            removeBtn.onClickEvent(() => this.removeContextFile(file));
+        }
+    }
+
+    async startNewChat() {
+        const container = this.containerEl.children[1];
+        const titleEl = this.initializeChatUI(container);
+        if (titleEl) titleEl.setText('New Chat');
+
+        this.currentChatFile = null;
+        this.history = [];
+        this.contextFiles = [];
+        this.isActiveContextEnabled = false;
+        this.renderContextChips();
+        this.addMessage({ role: 'model', content: 'Hello! I am Gemini. How can I help you with your notes today?' });
+    }
+
+    async loadChat(file: TFile) {
+        const container = this.containerEl.children[1];
+        const titleEl = this.initializeChatUI(container);
+        if (titleEl) titleEl.setText(file.basename);
+
+        // Reset context when loading old chat (or maybe we should persist it? keeping simple for now)
+        this.contextFiles = [];
+        this.isActiveContextEnabled = false;
+        this.renderContextChips();
+
+        const loadedHistory = await this.chatHistoryService.loadChat(file);
+        if (loadedHistory.length > 0) {
+            this.currentChatFile = file.name;
+            this.history = loadedHistory.map(msg => ({
+                role: msg.role,
+                content: msg.content,
+                parts: [{ text: msg.content }]
+            }));
+            
+            this.messagesContainer.empty();
+            for (const msg of this.history) {
+                this.addMessage(msg);
+            }
+            new Notice(`Loaded chat: ${file.basename}`);
+        } else {
+             this.startNewChat();
+        }
+    }
 
 	async handleSend() {
 		const text = this.inputTextArea.getValue().trim();
@@ -177,13 +401,98 @@ class GeminiChatView extends ItemView {
 		this.inputTextArea.setValue('');
 
 		// Add User Message
-		const userMsg: ChatMessage = { 
-			role: 'user', 
-			text: text,
-			parts: [{ text: text }] 
+		const userMsg: GeminiChatMessage = {
+			role: 'user',
+			content: text,
+			parts: [{ text: text }]
 		};
 		this.addMessage(userMsg);
+
+        // Build Context String
+        let contextContent = "";
+        
+        // 1. Active File Context
+        if (this.isActiveContextEnabled) {
+            const activeFile = this.app.workspace.getActiveFile();
+            if (activeFile && activeFile.extension === 'md') {
+                const content = await this.app.vault.read(activeFile);
+                contextContent += `
+
+--- Content of Active File [[${activeFile.path}]] ---
+${content}
+--- End of Active File ---
+`;
+            }
+        }
+
+        // 2. Manual Context Files
+        for (const file of this.contextFiles) {
+             const content = await this.app.vault.read(file);
+             contextContent += `
+
+--- Content of Selected File [[${file.path}]] ---
+${content}
+--- End of Selected File ---
+`;
+        }
+
+        // 3. Inline Links (Existing logic)
+        const linkRegex = /\`\[\[([^\]]+)\]\]\`\]/g;
+        const matches = Array.from(text.matchAll(linkRegex));
+
+        if (matches.length > 0) {
+            new Notice(`Reading ${matches.length} linked file(s)...`, 3000);
+            
+            for (const match of matches) {
+                const linkContent = match[1];
+                const cleanLink = linkContent.split('|')[0];
+
+                const resolution = await this.noteService.resolveNoteFile(cleanLink);
+                if (resolution.type === 'resolved') {
+                    const content = await this.noteService.readNoteText(resolution.file);
+                    contextContent += `
+
+--- Content of Linked File [[${cleanLink}]] ---
+${content}
+--- End of Linked File ---
+`;
+                } else if (resolution.type === 'not_unique') {
+                     contextContent += `
+
+--- Ambiguous link [[${cleanLink}]] (matches multiple files) ---`;
+                } else {
+                    contextContent += `
+
+--- Could not resolve [[${cleanLink}]] ---`;
+                }
+            }
+        }
+
+        // Append context to message parts for the API
+        if (contextContent) {
+            userMsg.parts = [{ text: text + "\n\n" + contextContent }];
+        }
+
         this.history.push(userMsg);
+        
+        // Save after user message
+        try {
+            const savedFile = await this.chatHistoryService.saveChat(
+                this.plugin.settings.chatHistoryFolder,
+                this.history.map(m => ({ role: m.role, content: m.content })),
+                this.currentChatFile || undefined
+            );
+            this.currentChatFile = savedFile;
+            
+            // Update title if it was "New Chat"
+            const titleEl = this.headerContainer.querySelector('.gemini-chat-title');
+            if (titleEl && this.currentChatFile) {
+                titleEl.setText(this.currentChatFile.replace(/\.md$/, ''));
+            }
+            
+        } catch (e) {
+            console.error("Failed to save chat:", e);
+        }
 
 		// Show Loading
 		const loadingEl = this.messagesContainer.createDiv({ cls: 'gemini-chat-loading' });
@@ -193,13 +502,21 @@ class GeminiChatView extends ItemView {
 		try {
 			// Call API
 			const responseMsg = await this.callGeminiAPI(this.history);
-			
+
 			// Remove Loading
 			loadingEl.remove();
 
 			// Add Model Message
 			this.addMessage(responseMsg);
             this.history.push(responseMsg);
+
+            // Save after model message
+            const savedFile = await this.chatHistoryService.saveChat(
+                this.plugin.settings.chatHistoryFolder,
+                this.history.map(m => ({ role: m.role, content: m.content })),
+                this.currentChatFile || undefined
+            );
+            this.currentChatFile = savedFile;
 
 		} catch (error) {
 			console.error('Gemini Error:', error);
@@ -208,13 +525,13 @@ class GeminiChatView extends ItemView {
 		}
 	}
 
-	async addMessage(msg: ChatMessage) {
+	async addMessage(msg: GeminiChatMessage) {
 		const msgEl = this.messagesContainer.createDiv({ cls: `gemini-chat-message ${msg.role}` });
-		
+
 		// Render Main Message
 		await MarkdownRenderer.render(
 			this.app,
-			msg.text,
+			msg.content,
 			msgEl,
 			'',
 			this
@@ -223,7 +540,7 @@ class GeminiChatView extends ItemView {
 		this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
 	}
 
-	async callGeminiAPI(history: ChatMessage[]): Promise<ChatMessage> {
+	async callGeminiAPI(history: GeminiChatMessage[]): Promise<GeminiChatMessage> {
 		const { apiKey, modelName, thinkingLevel } = this.plugin.settings;
 		// Use v1alpha for preview features like thinking_level
 		const url = `https://generativelanguage.googleapis.com/v1alpha/models/${modelName}:generateContent`;
@@ -232,7 +549,7 @@ class GeminiChatView extends ItemView {
 		// API expects: { role: "user"|"model", parts: [{ text: "..." }, { thoughtSignature: "..." }] }
 		const contents = history.map(msg => ({
 			role: msg.role,
-			parts: msg.parts || [{ text: msg.text }]
+			parts: msg.parts || [{ text: msg.content }]
 		}));
 
 		const body = {
@@ -269,33 +586,33 @@ class GeminiChatView extends ItemView {
 			
             // Identify parts
             // Thought parts usually have "thought": true (boolean) in the part object in v1alpha
-            // Response text is in a part with "text" and NO "thought": true
+            // Response content is in a part with "text" and NO "thought": true
             
-			// Find the main response text part (first part that has text and is NOT a thought)
+			// Find the main response content part (first part that has text and is NOT a thought)
             // If no such part found, fallback to any text part
-			const textPart = content.parts.find((p: any) => p.text && p.thought !== true);
+			const contentPart = content.parts.find((p: any) => p.text && p.thought !== true);
             const thoughtPart = content.parts.find((p: any) => p.thought === true);
             
-            let text = "";
-            if (textPart) {
-                text = textPart.text;
-            } else if (thoughtPart && !textPart) {
+            let responseContent = "";
+            if (contentPart) {
+                responseContent = contentPart.text;
+            } else if (thoughtPart && !contentPart) {
                  // Only thoughts returned?
-                 text = "(Thinking process only, no final response generated)";
+                 responseContent = "(Thinking process only, no final response generated)";
             } else {
-                text = "(No response text generated)";
+                responseContent = "(No response content generated)";
             }
 			
 			return {
 				role: 'model',
-				text: text,
+				content: responseContent,
 				parts: content.parts // Store all parts including signatures and thoughts
 			};
 		} else {
             return {
 				role: 'model',
-				text: "(No response text generated)",
-				parts: [{ text: "(No response text generated)" }]
+				content: "(No response content generated)",
+				parts: [{ text: "(No response content generated)" }]
 			};
         }
 	}
@@ -354,6 +671,17 @@ class GeminiSettingTab extends PluginSettingTab {
 				.setValue(this.plugin.settings.thinkingLevel)
 				.onChange(async (value) => {
 					this.plugin.settings.thinkingLevel = value as 'low' | 'high';
+					await this.plugin.saveSettings();
+				}));
+
+		new Setting(containerEl)
+			.setName('Chat History Folder')
+			.setDesc('The folder to save your chat history files. e.g., "Gemini Chats"')
+			.addText(text => text
+				.setPlaceholder('Gemini Chats')
+				.setValue(this.plugin.settings.chatHistoryFolder)
+				.onChange(async (value) => {
+					this.plugin.settings.chatHistoryFolder = value;
 					await this.plugin.saveSettings();
 				}));
 	}
