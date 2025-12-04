@@ -40,7 +40,7 @@ export class ChatHistoryService {
         }
     }
 
-    async saveChat(folderPath: string, messages: ChatMessage[], fileName?: string): Promise<string> {
+    async saveChat(folderPath: string, messages: ChatMessage[], fileName?: string, firstUserMessageContent?: string): Promise<string> {
         const normalizedFolder = normalizePath(folderPath);
         
         // Ensure folder exists
@@ -57,10 +57,27 @@ export class ChatHistoryService {
             targetPath = normalizePath(`${normalizedFolder}/${fileName}`);
             targetFile = this.app.vault.getAbstractFileByPath(targetPath) as TFile;
         } else {
-            // Generate new filename
-            const dateStr = new Date().toISOString().replace(/[:\.]/g, "-").slice(0, 19);
-            const baseName = `Chat ${dateStr}.md`;
-            targetPath = normalizePath(`${normalizedFolder}/${baseName}`);
+            // Generate new filename based on first user message content or timestamp
+            let baseName = "";
+            if (firstUserMessageContent) {
+                baseName = this.sanitizeFilename(firstUserMessageContent);
+                if (baseName.length > 50) {
+                    baseName = baseName.substring(0, 50) + "...";
+                }
+                // Ensure uniqueness if a file with this name already exists
+                let counter = 0;
+                let uniqueBaseName = baseName;
+                while (this.app.vault.getAbstractFileByPath(normalizePath(`${normalizedFolder}/${uniqueBaseName}.md`))) {
+                    counter++;
+                    uniqueBaseName = `${baseName}-${counter}`;
+                }
+                baseName = uniqueBaseName;
+
+            } else {
+                const dateStr = new Date().toISOString().replace(/[:\.]/g, "-").slice(0, 19);
+                baseName = `Chat ${dateStr}`;
+            }
+            targetPath = normalizePath(`${normalizedFolder}/${baseName}.md`);
         }
 
         const fileContent = this.generateNoteContent(chatContent);
@@ -77,6 +94,11 @@ export class ChatHistoryService {
             new Notice(`Failed to save chat: ${error.message}`);
             throw error;
         }
+    }
+
+    private sanitizeFilename(name: string): string {
+        // Remove invalid characters for filenames and replace spaces with dashes
+        return name.replace(/[\\/:*?"<>|]/g, '').replace(/\s/g, ' ').trim();
     }
 
     private generateNoteContent(chatContent: string): string {

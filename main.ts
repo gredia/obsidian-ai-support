@@ -4,6 +4,7 @@ import { ChatHistoryService, ChatMessage as HistoryChatMessage } from './chat-hi
 import { ChatHistoryModal } from './chat-history-modal';
 import { FileSuggestModal } from './file-suggest-modal';
 import { GeminiFileManager } from './gemini-file-manager';
+import { GeminiCacheManager } from './gemini-cache-manager';
 
 // ----------------------------------------------------------------
 // Settings & Constants
@@ -14,13 +15,17 @@ interface GeminiPluginSettings {
 	modelName: string;
 	thinkingLevel: 'low' | 'high';
 	chatHistoryFolder: string;
+    enableGoogleSearch: boolean;
+    enableUrlContext: boolean;
 }
 
 const DEFAULT_SETTINGS: GeminiPluginSettings = {
 	apiKey: '',
 	modelName: 'gemini-3-pro-preview',
 	thinkingLevel: 'high',
-	chatHistoryFolder: 'Gemini Chats'
+	chatHistoryFolder: 'Gemini Chats',
+    enableGoogleSearch: false,
+    enableUrlContext: false
 }
 
 const VIEW_TYPE_GEMINI_CHAT = 'gemini-chat-view';
@@ -126,6 +131,8 @@ interface GeminiChatMessage {
 	content: string; // Renamed from 'text' to 'content' to match HistoryChatMessage
 	parts?: any[];
     usageMetadata?: { promptTokenCount: number; candidatesTokenCount: number; totalTokenCount: number };
+    groundingMetadata?: any;
+    images?: string[]; // Resource paths for display
 }
 
 class GeminiChatView extends ItemView {
@@ -136,24 +143,29 @@ class GeminiChatView extends ItemView {
     contextChipsContainer: HTMLElement;
     activeContextBtn: HTMLElement;
     
-	history: GeminiChatMessage[] = [];
-    noteService: NoteService;
-    chatHistoryService: ChatHistoryService;
-    fileManager: GeminiFileManager;
-    currentChatFile: string | null = null;
-    
-    // Context State
-    contextFiles: TFile[] = [];
-    isActiveContextEnabled: boolean = false;
-
-	constructor(leaf: WorkspaceLeaf, plugin: GeminiPlugin) {
-		super(leaf);
-		this.plugin = plugin;
-        this.noteService = new NoteService(plugin.app);
-        this.chatHistoryService = new ChatHistoryService(plugin.app);
-        this.fileManager = new GeminiFileManager(plugin.app);
-	}
-
+	    history: GeminiChatMessage[] = [];
+	    noteService: NoteService;
+	    chatHistoryService: ChatHistoryService;
+	    fileManager: GeminiFileManager;
+	    cacheManager: GeminiCacheManager;
+	    currentChatFile: string | null = null;
+	    
+	    // Context State
+	    contextFiles: TFile[] = [];
+	    isActiveContextEnabled: boolean = true;
+	    
+	    // Cache State
+	    activeCacheName: string | null = null;
+	    activeCacheTTL: string = "600s"; // Default 10 minutes
+	
+		constructor(leaf: WorkspaceLeaf, plugin: GeminiPlugin) {
+			super(leaf);
+			this.plugin = plugin;
+	        this.noteService = new NoteService(plugin.app);
+	        this.chatHistoryService = new ChatHistoryService(plugin.app);
+	        this.fileManager = new GeminiFileManager(plugin.app);
+	        this.cacheManager = new GeminiCacheManager(plugin.app);
+		}
 	getViewType() {
 		return VIEW_TYPE_GEMINI_CHAT;
 	}
@@ -288,6 +300,13 @@ class GeminiChatView extends ItemView {
             this.renderContextChips();
         });
 
+        // Create Cache Button
+        const cacheBtn = toolbar.createDiv({ cls: 'gemini-toolbar-btn', attr: { title: 'Create cache from current context' } });
+        setIcon(cacheBtn, 'zap');
+        cacheBtn.onClickEvent(() => {
+            this.createContextCache();
+        });
+
         this.inputTextArea = new TextAreaComponent(inputRow);
         this.inputTextArea.inputEl.addClass('gemini-chat-input');
         this.inputTextArea.setPlaceholder('Ask Gemini...');
@@ -300,12 +319,153 @@ class GeminiChatView extends ItemView {
             }
         });
 
+        // Handle Paste for Images
+        this.inputTextArea.inputEl.addEventListener('paste', async (e: ClipboardEvent) => {
+            if (e.clipboardData && e.clipboardData.items) {
+                for (let i = 0; i < e.clipboardData.items.length; i++) {
+                    const item = e.clipboardData.items[i];
+                    if (item.type.indexOf('image') !== -1) {
+                        e.preventDefault();
+                        const blob = item.getAsFile();
+                        if (blob) {
+                            const arrayBuffer = await blob.arrayBuffer();
+                            await this.handleImagePaste(arrayBuffer, item.type);
+                        }
+                    }
+                }
+            }
+        });
+
         const sendBtn = new ButtonComponent(inputRow);
         sendBtn.setIcon('send');
         sendBtn.setClass('gemini-chat-send-btn');
         sendBtn.onClick(() => this.handleSend());
         
         return titleEl; 
+    }
+
+    async handleImagePaste(buffer: ArrayBuffer, mimeType: string) {
+        const extension = mimeType.split('/')[1] || 'png';
+        const dateStr = new Date().toISOString().replace(/[:\.]/g, "-").slice(0, 19);
+        const baseName = `Pasted Image ${dateStr}`;
+        const folderPath = this.plugin.settings.chatHistoryFolder;
+
+        // Ensure folder exists
+        if (!this.app.vault.getAbstractFileByPath(folderPath)) {
+            try {
+                await this.app.vault.createFolder(folderPath);
+            } catch (e) {
+                // Ignore if created concurrently
+            }
+        }
+        
+        // Find unique filename
+        let fileName = `${baseName}.${extension}`;
+        let filePath = `${folderPath}/${fileName}`;
+        let counter = 1;
+        while (this.app.vault.getAbstractFileByPath(filePath)) {
+            fileName = `${baseName} (${counter}).${extension}`;
+            filePath = `${folderPath}/${fileName}`;
+            counter++;
+        }
+        
+        try {
+            const file = await this.app.vault.createBinary(filePath, buffer);
+            this.addContextFile(file);
+            new Notice(`Image pasted: ${fileName}`);
+        } catch (error) {
+            console.error('Failed to save pasted image:', error);
+            new Notice(`Failed to save pasted image: ${error.message}`);
+        }
+    }
+
+    async createContextCache() {
+        if (this.contextFiles.length === 0 && !this.isActiveContextEnabled) {
+            new Notice("No context selected to cache.");
+            return;
+        }
+
+        if (!this.plugin.settings.apiKey) {
+            new Notice('Please set your Gemini API Key in settings.');
+            return;
+        }
+
+        new Notice("Creating context cache...");
+        
+        const cacheContents: any[] = [];
+
+        // Process Files for Cache
+        for (const file of this.contextFiles) {
+            if (this.fileManager.isMediaFile(file)) {
+                try {
+                    const fileUri = await this.fileManager.uploadFile(file, this.plugin.settings.apiKey);
+                    const mimeType = this.fileManager.getMimeType(file.extension) || 'application/octet-stream';
+                    cacheContents.push({
+                        role: 'user',
+                        parts: [{
+                            file_data: {
+                                mime_type: mimeType,
+                                file_uri: fileUri
+                            }
+                        }]
+                    });
+                } catch (err) {
+                    new Notice(`Failed to cache ${file.basename}: ${err.message}`);
+                }
+            } else {
+                const content = await this.app.vault.read(file);
+                cacheContents.push({
+                    role: 'user',
+                    parts: [{ text: `Content of ${file.basename}:\n${content}` }]
+                });
+            }
+        }
+
+        if (this.isActiveContextEnabled) {
+            const activeFile = this.app.workspace.getActiveFile();
+            if (activeFile) {
+                 const content = await this.app.vault.read(activeFile);
+                 cacheContents.push({
+                    role: 'user',
+                    parts: [{ text: `Content of Active File (${activeFile.basename}):\n${content}` }]
+                });
+            }
+        }
+
+        // --- Validate Token Count ---
+        try {
+            const count = await this.countTokensAPI(cacheContents);
+            console.log("Token count for cache:", count);
+            
+            // Check for minimum token requirements (approximate)
+            // Flash: 1024, Pro: 4096, 3-Pro: 2048
+            // We'll use a conservative warning threshold of 1000
+            if (count.totalTokens < 1000) {
+                 new Notice(`Warning: Content size (${count.totalTokens} tokens) may be too small to cache. Minimum is usually ~1024.`);
+                 // We don't block it, just warn, as model limits vary.
+            }
+        } catch (e) {
+            console.warn("Failed to count tokens before caching:", e);
+        }
+        // -----------------------------
+
+        try {
+            const cache = await this.cacheManager.createCache(this.plugin.settings.apiKey, {
+                model: `models/${this.plugin.settings.modelName}`,
+                contents: cacheContents,
+                ttl: this.activeCacheTTL,
+                systemInstruction: {
+                    role: 'user',
+                    parts: [{ text: "You are an expert assistant. Answer questions based on the provided cached context." }]
+                }
+            });
+
+            this.activeCacheName = cache.name;
+            new Notice("Context cached successfully! subsequent messages will be faster/cheaper.");
+            this.renderContextChips(); // Update UI
+        } catch (error) {
+            new Notice(`Failed to create cache: ${error.message}`);
+        }
     }
 
     addContextFile(file: TFile) {
@@ -323,6 +483,20 @@ class GeminiChatView extends ItemView {
     renderContextChips() {
         if (!this.contextChipsContainer) return;
         this.contextChipsContainer.empty();
+
+        if (this.activeCacheName) {
+            const cacheChip = this.contextChipsContainer.createDiv({ cls: 'gemini-context-chip', attr: { style: 'background-color: var(--color-green); color: white;' } });
+            cacheChip.createSpan({ text: '⚡ Context Cached' });
+            const removeBtn = cacheChip.createDiv({ cls: 'gemini-context-chip-remove' });
+            setIcon(removeBtn, 'trash');
+            removeBtn.onClickEvent(async () => {
+                await this.cacheManager.deleteCache(this.plugin.settings.apiKey, this.activeCacheName!);
+                this.activeCacheName = null;
+                this.renderContextChips();
+                new Notice("Cache cleared.");
+            });
+            return; // Hide individual files when cached
+        }
 
         // Update active context button state
         if (this.activeContextBtn) {
@@ -342,11 +516,24 @@ class GeminiChatView extends ItemView {
 
         // Render Selected Files
         for (const file of this.contextFiles) {
+            const isImage = this.fileManager.isImage(file);
             const chip = this.contextChipsContainer.createDiv({ cls: 'gemini-context-chip' });
-            chip.createSpan({ text: file.basename });
+            
+            if (isImage) {
+                chip.addClass('is-image-chip');
+                const resourcePath = this.app.vault.getResourcePath(file);
+                const img = chip.createEl('img');
+                img.src = resourcePath;
+                img.addClass('gemini-thumbnail-img');
+            }
+
+            chip.createSpan({ text: file.basename, cls: 'gemini-context-chip-filename' });
             const removeBtn = chip.createDiv({ cls: 'gemini-context-chip-remove' });
             setIcon(removeBtn, 'x');
-            removeBtn.onClickEvent(() => this.removeContextFile(file));
+            removeBtn.onClickEvent((e) => {
+                e.stopPropagation();
+                this.removeContextFile(file);
+            });
         }
     }
 
@@ -355,10 +542,15 @@ class GeminiChatView extends ItemView {
         const titleEl = this.initializeChatUI(container);
         if (titleEl) titleEl.setText('New Chat');
 
+        if (this.activeCacheName) {
+            await this.cacheManager.deleteCache(this.plugin.settings.apiKey, this.activeCacheName);
+            this.activeCacheName = null;
+        }
+
         this.currentChatFile = null;
         this.history = [];
         this.contextFiles = [];
-        this.isActiveContextEnabled = false;
+        this.isActiveContextEnabled = true;
         this.renderContextChips();
         this.addMessage({ role: 'model', content: 'Hello! I am Gemini. How can I help you with your notes today?' });
     }
@@ -370,7 +562,7 @@ class GeminiChatView extends ItemView {
 
         // Reset context when loading old chat (or maybe we should persist it? keeping simple for now)
         this.contextFiles = [];
-        this.isActiveContextEnabled = false;
+        this.isActiveContextEnabled = true;
         this.renderContextChips();
 
         const loadedHistory = await this.chatHistoryService.loadChat(file);
@@ -439,7 +631,7 @@ class GeminiChatView extends ItemView {
         };
 
         // 1. Process Active File
-        if (this.isActiveContextEnabled) {
+        if (this.isActiveContextEnabled && !this.activeCacheName) {
             const activeFile = this.app.workspace.getActiveFile();
             if (activeFile) {
                 await processFile(activeFile, "Active File");
@@ -447,8 +639,10 @@ class GeminiChatView extends ItemView {
         }
 
         // 2. Process Manual Context Files
-        for (const file of this.contextFiles) {
-             await processFile(file, "Selected File");
+        if (!this.activeCacheName) {
+            for (const file of this.contextFiles) {
+                 await processFile(file, "Selected File");
+            }
         }
 
         // 3. Process Inline Links (Text only for now, unless we want to recurse upload?)
@@ -483,26 +677,61 @@ class GeminiChatView extends ItemView {
             return;
         }
 
+        // Generate content display text (what the user sees in the chat)
+        // If there are context files, list them as links (excluding images which are shown separately)
+        let displayContent = text;
+        const nonImageFiles = this.contextFiles.filter(f => !this.fileManager.isImage(f));
+        const imageFiles = this.contextFiles.filter(f => this.fileManager.isImage(f));
+        const imagePaths = imageFiles.map(f => this.app.vault.getResourcePath(f));
+
+        if (nonImageFiles.length > 0) {
+            const fileLinks = nonImageFiles.map(file => `[[${file.path}|${file.basename}]]`).join(', ');
+            if (displayContent) {
+                displayContent += `\n\n**Attachments:** ${fileLinks}`;
+            } else {
+                displayContent = `**Attachments:** ${fileLinks}`;
+            }
+        }
+        
+        if (this.isActiveContextEnabled) {
+             const activeFile = this.app.workspace.getActiveFile();
+             if (activeFile) {
+                 const activeLink = `[[${activeFile.path}|${activeFile.basename}]]`;
+                 displayContent += displayContent ? `\n**Active Note:** ${activeLink}` : `**Active Note:** ${activeLink}`;
+             }
+        }
+
+        if (!displayContent && imagePaths.length === 0) {
+            displayContent = "[Empty message]";
+        }
+
 		// Add User Message
 		const userMsg: GeminiChatMessage = {
 			role: 'user',
-			content: text || (this.contextFiles.length > 0 ? `[Sent ${this.contextFiles.length} file(s)]` : "[Empty message]"),
-			parts: messageParts
+			content: displayContent,
+			parts: messageParts,
+            images: imagePaths
 		};
 		this.addMessage(userMsg);
 
         this.history.push(userMsg);
         
+        // Clear context after constructing the message
+        this.contextFiles = [];
+        this.renderContextChips();
+        
         // Save after user message
         try {
+            const isNewChatAndFirstUserMessage = this.currentChatFile === null && this.history.length === 1; // Check after pushing userMsg
             const savedFile = await this.chatHistoryService.saveChat(
                 this.plugin.settings.chatHistoryFolder,
                 this.history.map(m => ({ role: m.role, content: m.content })),
-                this.currentChatFile || undefined
+                this.currentChatFile || undefined,
+                isNewChatAndFirstUserMessage ? text : undefined
             );
             this.currentChatFile = savedFile;
             
-            // Update title if it was "New Chat"
+            // Update title if it was "New Chat" or first user message of a new chat
             const titleEl = this.headerContainer.querySelector('.gemini-chat-title');
             if (titleEl && this.currentChatFile) {
                 titleEl.setText(this.currentChatFile.replace(/\.md$/, ''));
@@ -519,7 +748,7 @@ class GeminiChatView extends ItemView {
 
 		try {
 			// Call API
-			const responseMsg = await this.callGeminiAPI(this.history);
+			const responseMsg = await this.callGeminiAPI(this.history, this.activeCacheName);
 
 			// Remove Loading
 			loadingEl.remove();
@@ -544,7 +773,22 @@ class GeminiChatView extends ItemView {
 	}
 
 	async addMessage(msg: GeminiChatMessage) {
-		const msgEl = this.messagesContainer.createDiv({ cls: `gemini-chat-message ${msg.role}` });
+        // Wrapper for row layout
+        const rowEl = this.messagesContainer.createDiv({ cls: `gemini-chat-row ${msg.role}` });
+
+        // Images Container (if any)
+        if (msg.images && msg.images.length > 0) {
+            const imagesEl = rowEl.createDiv({ cls: 'gemini-chat-images' });
+            for (const imgPath of msg.images) {
+                imagesEl.createEl('img', { 
+                    attr: { src: imgPath, class: 'gemini-chat-image-thumb' } 
+                }).onClickEvent(() => {
+                    // Optional: click to expand? For now just a thumb.
+                });
+            }
+        }
+
+		const msgEl = rowEl.createDiv({ cls: `gemini-chat-message ${msg.role}` });
 
 		// Render Main Message
 		await MarkdownRenderer.render(
@@ -555,6 +799,36 @@ class GeminiChatView extends ItemView {
 			this
 		);
 
+        // Render Grounding Metadata (Sources & Search Queries)
+        if (msg.groundingMetadata) {
+            const groundingEl = msgEl.createDiv({ cls: 'gemini-chat-grounding', attr: { style: 'margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--background-modifier-border); font-size: 0.85em;' } });
+            
+            // Search Queries
+            if (msg.groundingMetadata.webSearchQueries && msg.groundingMetadata.webSearchQueries.length > 0) {
+                const queriesEl = groundingEl.createDiv({ cls: 'gemini-search-queries', attr: { style: 'margin-bottom: 5px; color: var(--text-muted);' } });
+                queriesEl.createSpan({ text: '🔍 Searched for: ' });
+                msg.groundingMetadata.webSearchQueries.forEach((q: string, i: number) => {
+                    if (i > 0) queriesEl.createSpan({ text: ', ' });
+                    queriesEl.createSpan({ text: q, cls: 'gemini-search-query', attr: { style: 'font-style: italic;' } });
+                });
+            }
+
+            // Sources
+            if (msg.groundingMetadata.groundingChunks && msg.groundingMetadata.groundingChunks.length > 0) {
+                const sourcesEl = groundingEl.createDiv({ cls: 'gemini-search-sources' });
+                sourcesEl.createDiv({ text: 'Sources:', cls: 'gemini-sources-header', attr: { style: 'font-weight: bold; margin-bottom: 4px;' } });
+                const listEl = sourcesEl.createEl('ul', { attr: { style: 'margin: 0; padding-left: 20px;' } });
+                
+                msg.groundingMetadata.groundingChunks.forEach((chunk: any, i: number) => {
+                    if (chunk.web?.uri && chunk.web?.title) {
+                        const li = listEl.createEl('li');
+                        li.createEl('a', { href: chunk.web.uri, text: `${chunk.web.title}` }); // Link only shows title
+                        li.createSpan({ text: ` (${i+1})`, attr: { style: 'font-size: 0.8em; color: var(--text-muted);' } }); // Indicate index match
+                    }
+                });
+            }
+        }
+
         // Render Usage Metadata if available (only for model messages usually)
         if (msg.usageMetadata) {
             const metaEl = msgEl.createDiv({ cls: 'gemini-chat-meta', attr: { style: 'font-size: 0.75em; color: var(--text-muted); margin-top: 5px; text-align: right;' } });
@@ -564,8 +838,8 @@ class GeminiChatView extends ItemView {
 		this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
 	}
 
-	async callGeminiAPI(history: GeminiChatMessage[]): Promise<GeminiChatMessage> {
-		const { apiKey, modelName, thinkingLevel } = this.plugin.settings;
+	async callGeminiAPI(history: GeminiChatMessage[], cachedContentName?: string | null): Promise<GeminiChatMessage> {
+		const { apiKey, modelName, thinkingLevel, enableGoogleSearch, enableUrlContext } = this.plugin.settings;
 		// Use v1alpha for preview features like thinking_level
 		const url = `https://generativelanguage.googleapis.com/v1alpha/models/${modelName}:generateContent`;
 
@@ -576,7 +850,15 @@ class GeminiChatView extends ItemView {
 			parts: msg.parts || [{ text: msg.content }]
 		}));
 
-		const body = {
+        const tools: any[] = [];
+        if (enableGoogleSearch) {
+            tools.push({ google_search: {} });
+        }
+        if (enableUrlContext) {
+            tools.push({ url_context: {} });
+        }
+
+		const body: any = {
 			contents: contents,
 			generationConfig: {
 				thinkingConfig: {
@@ -585,6 +867,14 @@ class GeminiChatView extends ItemView {
 				}
 			}
 		};
+
+        if (tools.length > 0) {
+            body.tools = tools;
+        }
+
+        if (cachedContentName) {
+            body.cachedContent = cachedContentName;
+        }
 
 		const response = await requestUrl({
 			url: url,
@@ -606,8 +896,10 @@ class GeminiChatView extends ItemView {
 		
 		// Extract parts from response to preserve thoughtSignature
 		if (data.candidates && data.candidates.length > 0 && data.candidates[0].content) {
-			const content = data.candidates[0].content;
+			const candidate = data.candidates[0];
+            const content = candidate.content;
 			const usageMetadata = data.usageMetadata;
+            const groundingMetadata = candidate.groundingMetadata;
 			
             // Identify parts
             // Thought parts usually have "thought": true (boolean) in the part object in v1alpha
@@ -621,6 +913,12 @@ class GeminiChatView extends ItemView {
             let responseContent = "";
             if (contentPart) {
                 responseContent = contentPart.text;
+                
+                // Add citations if available
+                if (groundingMetadata) {
+                     responseContent = this.addCitations(responseContent, groundingMetadata);
+                }
+
             } else if (thoughtPart && !contentPart) {
                  // Only thoughts returned?
                  responseContent = "(Thinking process only, no final response generated)";
@@ -632,7 +930,8 @@ class GeminiChatView extends ItemView {
 				role: 'model',
 				content: responseContent,
 				parts: content.parts, // Store all parts including signatures and thoughts
-                usageMetadata: usageMetadata
+                usageMetadata: usageMetadata,
+                groundingMetadata: groundingMetadata
 			};
 		} else {
             return {
@@ -643,8 +942,85 @@ class GeminiChatView extends ItemView {
         }
 	}
 
+    addCitations(text: string, groundingMetadata: any): string {
+        if (!groundingMetadata || !groundingMetadata.groundingSupports || !groundingMetadata.groundingChunks) {
+            return text;
+        }
+
+        const supports = groundingMetadata.groundingSupports;
+        const chunks = groundingMetadata.groundingChunks;
+        
+        // Sort supports by end_index in descending order to avoid shifting issues when inserting.
+        const sortedSupports = [...supports].sort((a: any, b: any) => {
+             const endA = a.segment?.endIndex || 0;
+             const endB = b.segment?.endIndex || 0;
+             return endB - endA;
+        });
+
+        let newText = text;
+
+        for (const support of sortedSupports) {
+            const endIndex = support.segment?.endIndex;
+            const indices = support.groundingChunkIndices;
+
+            if (endIndex === undefined || !indices || indices.length === 0) {
+                continue;
+            }
+
+            // Verify indices are valid
+            const validIndices = indices.filter((i: number) => i >= 0 && i < chunks.length);
+            if (validIndices.length === 0) continue;
+
+            const citationLinks = validIndices.map((i: number) => {
+                const chunk = chunks[i];
+                const uri = chunk.web?.uri;
+                const title = chunk.web?.title || "Source";
+                if (uri) {
+                    return `[${i + 1}](${uri} "${title}")`;
+                }
+                return `[${i + 1}]`;
+            });
+
+            const citationString = " " + citationLinks.join(""); // Add space before citations
+            
+            // Insert at endIndex
+            if (endIndex <= newText.length) {
+                 newText = newText.slice(0, endIndex) + citationString + newText.slice(endIndex);
+            }
+        }
+        
+        return newText;
+    }
+
+    async countTokensAPI(contents: any[]): Promise<{ totalTokens: number }> {
+        const { apiKey, modelName } = this.plugin.settings;
+        // Use v1beta for countTokens as it's stable there, but v1alpha should also work.
+        // Using the same model name as generateContent.
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:countTokens`;
+
+        const response = await requestUrl({
+            url: url,
+            method: 'POST',
+            headers: {
+                'Content-Type': 'application/json',
+                'x-goog-api-key': apiKey
+            },
+            body: JSON.stringify({ contents: contents }),
+            throw: false
+        });
+
+        if (response.status >= 400) {
+             throw new Error(`CountTokens API Error ${response.status}: ${response.text}`);
+        }
+
+        return response.json;
+    }
+
 	async onClose() {
-		// cleanup
+		if (this.activeCacheName) {
+            await this.cacheManager.deleteCache(this.plugin.settings.apiKey, this.activeCacheName);
+            console.log("Cache deleted:", this.activeCacheName);
+        }
 	}
 }
 
@@ -710,5 +1086,25 @@ class GeminiSettingTab extends PluginSettingTab {
 					this.plugin.settings.chatHistoryFolder = value;
 					await this.plugin.saveSettings();
 				}));
+
+        new Setting(containerEl)
+            .setName('Enable Google Search')
+            .setDesc('Allow the model to use Google Search for grounding.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableGoogleSearch)
+                .onChange(async (value) => {
+                    this.plugin.settings.enableGoogleSearch = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Enable URL Context')
+            .setDesc('Allow the model to fetch and use content from URLs provided in the prompt.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableUrlContext)
+                .onChange(async (value) => {
+                    this.plugin.settings.enableUrlContext = value;
+                    await this.plugin.saveSettings();
+                }));
 	}
 }

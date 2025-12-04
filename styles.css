@@ -65,6 +65,24 @@
     padding-bottom: 10px;
 }
 
+/* Message Rows (Layout for bubble + side elements) */
+.gemini-chat-row {
+    display: flex;
+    gap: 10px;
+    align-items: flex-end;
+    width: 100%;
+}
+
+.gemini-chat-row.user {
+    flex-direction: row-reverse;
+    justify-content: flex-start;
+}
+
+.gemini-chat-row.model {
+    flex-direction: row;
+    justify-content: flex-start;
+}
+
 /* Message Bubbles */
 .gemini-chat-message {
     max-width: 85%;
@@ -76,17 +94,38 @@
 }
 
 .gemini-chat-message.user {
-    align-self: flex-end;
-    background-color: var(--interactive-accent);
-    color: var(--text-on-accent);
+    background-color: var(--background-secondary-alt);
+    color: var(--text-normal);
     border-bottom-right-radius: 2px;
 }
 
 .gemini-chat-message.model {
-    align-self: flex-start;
     background-color: var(--background-secondary);
     color: var(--text-normal);
     border-bottom-left-radius: 2px;
+}
+
+/* Chat Images (Side Thumbnails) */
+.gemini-chat-images {
+    display: flex;
+    flex-direction: column;
+    gap: 5px;
+    flex-shrink: 0;
+}
+
+.gemini-chat-image-thumb {
+    width: 60px;
+    height: 60px;
+    object-fit: cover;
+    border-radius: 6px;
+    border: 1px solid var(--background-modifier-border);
+    cursor: pointer;
+    transition: transform 0.1s;
+}
+
+.gemini-chat-image-thumb:hover {
+    transform: scale(1.05);
+    border-color: var(--interactive-accent);
 }
 
 /* Input Area Layout */
@@ -111,12 +150,22 @@
     display: flex;
     align-items: center;
     gap: 5px;
-    padding: 2px 8px;
+    padding: 4px 8px;
     border-radius: 12px;
     background-color: var(--background-modifier-border);
     font-size: 0.8em;
     color: var(--text-normal);
     user-select: none;
+    position: relative;
+    border: 1px solid transparent;
+}
+
+.gemini-context-chip.is-image-chip {
+    padding: 0;
+    border-radius: 6px;
+    overflow: hidden;
+    background-color: transparent;
+    border: 1px solid var(--background-modifier-border);
 }
 
 .gemini-context-chip.is-active-file {
@@ -124,15 +173,56 @@
     color: var(--text-on-accent);
 }
 
+.gemini-context-chip-filename {
+    max-width: 150px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.gemini-context-chip.is-image-chip .gemini-context-chip-filename {
+    display: none;
+}
+
 .gemini-context-chip-remove {
     cursor: pointer;
     display: flex;
     align-items: center;
+    justify-content: center;
     opacity: 0.6;
+    border-radius: 50%;
+    width: 16px;
+    height: 16px;
+    transition: opacity 0.2s, background-color 0.2s;
 }
 
 .gemini-context-chip-remove:hover {
     opacity: 1;
+    background-color: var(--background-modifier-hover);
+}
+
+/* Position remove button for image chips */
+.gemini-context-chip.is-image-chip .gemini-context-chip-remove {
+    position: absolute;
+    top: 2px;
+    right: 2px;
+    background-color: rgba(0, 0, 0, 0.5);
+    color: white;
+    opacity: 0.8;
+}
+
+.gemini-context-chip.is-image-chip .gemini-context-chip-remove:hover {
+    background-color: rgba(0, 0, 0, 0.8);
+    opacity: 1;
+}
+
+/* Thumbnail Image in Chip */
+.gemini-thumbnail-img {
+    height: 60px; /* Larger thumbnail */
+    width: auto;
+    min-width: 60px;
+    display: block;
+    object-fit: cover;
 }
 
 /* Input Row */

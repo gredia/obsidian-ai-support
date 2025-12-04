@@ -170,4 +170,9 @@ export class GeminiFileManager {
         if (!mime) return false;
         return mime.startsWith('image/') || mime.startsWith('audio/') || mime.startsWith('video/') || mime === 'application/pdf';
     }
+
+    isImage(file: TFile): boolean {
+        const mime = this.getMimeType(file.extension);
+        return mime ? mime.startsWith('image/') : false;
+    }
 }
