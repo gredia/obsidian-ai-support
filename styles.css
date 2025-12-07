@@ -288,6 +288,42 @@
     color: var(--interactive-accent);
 }
 
+.gemini-chat-toolbar {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    flex-wrap: wrap;
+    margin-bottom: 5px;
+}
+
+.gemini-toolbar-btn {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    white-space: nowrap;
+}
+
+.gemini-model-selector-container {
+    margin-left: auto; /* Push to the right */
+    display: flex;
+    align-items: center;
+}
+
+.gemini-model-selector {
+    background-color: var(--background-primary);
+    color: var(--text-normal);
+    border: 1px solid var(--background-modifier-border);
+    border-radius: 4px;
+    padding: 2px 4px;
+    font-size: 0.85em;
+    cursor: pointer;
+    outline: none;
+}
+
+.gemini-model-selector:hover {
+    border-color: var(--interactive-accent);
+}
+
 .gemini-chat-input {
     flex-grow: 1;
     resize: none;
