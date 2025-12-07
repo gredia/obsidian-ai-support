@@ -17,6 +17,7 @@ interface GeminiPluginSettings {
 	chatHistoryFolder: string;
     enableGoogleSearch: boolean;
     enableUrlContext: boolean;
+    enableAutoCache: boolean;
 }
 
 const DEFAULT_SETTINGS: GeminiPluginSettings = {
@@ -25,7 +26,8 @@ const DEFAULT_SETTINGS: GeminiPluginSettings = {
 	thinkingLevel: 'high',
 	chatHistoryFolder: 'Gemini Chats',
     enableGoogleSearch: false,
-    enableUrlContext: false
+    enableUrlContext: false,
+    enableAutoCache: false
 }
 
 const VIEW_TYPE_GEMINI_CHAT = 'gemini-chat-view';
@@ -194,6 +196,16 @@ class GeminiChatView extends ItemView {
         this.addAction('home', 'Home', () => {
             this.renderWelcomeScreen();
         });
+
+        // Update context chips when active file changes
+        this.registerEvent(
+            this.app.workspace.on('active-leaf-change', () => {
+                // Only update if the view is initialized and active context is enabled
+                if (this.contextChipsContainer && this.isActiveContextEnabled) {
+                    this.renderContextChips();
+                }
+            })
+        );
 	}
 
 	async onOpen() {
@@ -302,16 +314,6 @@ class GeminiChatView extends ItemView {
             this.renderContextChips();
         });
 
-        // Create Cache Button (Adding it back as requested in previous turn, but user asked to remove auto-cache logic. 
-        // Wait, current prompt says "buttons like Add File, Active Note, Cache ... above the chat box".
-        // So I MUST include the Cache button in the toolbar.)
-        const cacheBtn = toolbar.createDiv({ cls: 'gemini-toolbar-btn', attr: { title: 'Create cache from current context' } });
-        setIcon(cacheBtn, 'zap');
-        cacheBtn.createSpan({ text: 'Cache' });
-        cacheBtn.onClickEvent(() => {
-            this.createContextCache();
-        });
-
         // Context Chips (Row 2)
         this.contextChipsContainer = footer.createDiv({ cls: 'gemini-context-chips' });
         this.renderContextChips(); // Initial render
@@ -415,18 +417,18 @@ class GeminiChatView extends ItemView {
         }
     }
 
-    async createContextCache() {
+    async createContextCache(silent: boolean = false): Promise<string | null> {
         if (this.contextFiles.length === 0 && !this.isActiveContextEnabled) {
-            new Notice("No context selected to cache.");
-            return;
+            if (!silent) new Notice("No context selected to cache.");
+            return null;
         }
 
         if (!this.plugin.settings.apiKey) {
-            new Notice('Please set your Gemini API Key in settings.');
-            return;
+            if (!silent) new Notice('Please set your Gemini API Key in settings.');
+            return null;
         }
 
-        new Notice("Creating context cache...");
+        if (!silent) new Notice("Creating context cache...");
         
         const cacheContents: any[] = [];
 
@@ -446,7 +448,9 @@ class GeminiChatView extends ItemView {
                         }]
                     });
                 } catch (err) {
-                    new Notice(`Failed to cache ${file.basename}: ${err.message}`);
+                    const msg = `Failed to cache ${file.basename}: ${err.message}`;
+                    console.error(msg);
+                    if (!silent) new Notice(msg);
                 }
             } else {
                 const content = await this.app.vault.read(file);
@@ -475,13 +479,17 @@ class GeminiChatView extends ItemView {
             
             // Check for minimum token requirements (approximate)
             // Flash: 1024, Pro: 4096, 3-Pro: 2048
-            // We'll use a conservative warning threshold of 1000
-            if (count.totalTokens < 1000) {
-                 new Notice(`Warning: Content size (${count.totalTokens} tokens) may be too small to cache. Minimum is usually ~1024.`);
-                 // We don't block it, just warn, as model limits vary.
+            // The API requires strictly > 2048 for Context Caching.
+            if (count.totalTokens < 2048) {
+                 if (!silent) {
+                    new Notice(`Cannot create cache: Content size (${count.totalTokens} tokens) is below the minimum required (2048 tokens).`);
+                 }
+                 return null;
             }
         } catch (e) {
             console.warn("Failed to count tokens before caching:", e);
+            if (!silent) new Notice("Failed to count tokens, aborting cache creation.");
+            return null;
         }
         // -----------------------------
 
@@ -497,10 +505,14 @@ class GeminiChatView extends ItemView {
             });
 
             this.activeCacheName = cache.name;
-            new Notice("Context cached successfully! subsequent messages will be faster/cheaper.");
+            if (!silent) new Notice("Context cached successfully! subsequent messages will be faster/cheaper.");
             this.renderContextChips(); // Update UI
+            return cache.name;
         } catch (error) {
-            new Notice(`Failed to create cache: ${error.message}`);
+            const msg = `Failed to create cache: ${error.message}`;
+            console.error(msg);
+            if (!silent) new Notice(msg);
+            return null;
         }
     }
 
@@ -546,7 +558,9 @@ class GeminiChatView extends ItemView {
         // Render Active File Chip if enabled
         if (this.isActiveContextEnabled) {
             const activeChip = this.contextChipsContainer.createDiv({ cls: 'gemini-context-chip is-active-file' });
-            activeChip.createSpan({ text: 'Active Note' });
+            const activeFile = this.app.workspace.getActiveFile();
+            const fileName = activeFile ? activeFile.basename : '(None)';
+            activeChip.createSpan({ text: `Active Note: ${fileName}` });
             // No remove button for active context (toggled via eye button)
         }
 
@@ -638,6 +652,14 @@ class GeminiChatView extends ItemView {
 
 		// Clear input
 		this.inputTextArea.setValue('');
+
+        // 0. Auto-Cache Check
+        if (this.plugin.settings.enableAutoCache && !this.activeCacheName) {
+             const cachedName = await this.createContextCache(true);
+             if (cachedName) {
+                 new Notice("Context automatically cached for performance.");
+             }
+        }
 
         // Prepare User Message Parts
         const messageParts: any[] = [];
@@ -758,9 +780,9 @@ class GeminiChatView extends ItemView {
 
         this.history.push(userMsg);
         
-        // Clear context after constructing the message
-        this.contextFiles = [];
-        this.renderContextChips();
+        // Keep context files selected after sending, as requested.
+        // this.contextFiles = []; 
+        // this.renderContextChips();
         
         // Save after user message
         try {
@@ -788,9 +810,12 @@ class GeminiChatView extends ItemView {
 		loadingEl.setText('Gemini is thinking...');
 		this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
 
+        this.abortController = new AbortController();
+        this.setLoading(true);
+
 		try {
 			// Call API
-			const responseMsg = await this.callGeminiAPI(this.history, this.activeCacheName);
+			const responseMsg = await this.callGeminiAPI(this.history, this.activeCacheName, this.abortController.signal);
 
 			// Remove Loading
 			loadingEl.remove();
@@ -808,10 +833,17 @@ class GeminiChatView extends ItemView {
             this.currentChatFile = savedFile;
 
 		} catch (error) {
-			console.error('Gemini Error:', error);
-			loadingEl.setText(`Error: ${error.message}`);
-			new Notice(`Gemini Error: ${error.message}`);
-		}
+            if (error.name === 'AbortError') {
+                loadingEl.setText('Generation stopped.');
+            } else {
+                console.error('Gemini Error:', error);
+                loadingEl.setText(`Error: ${error.message}`);
+                new Notice(`Gemini Error: ${error.message}`);
+            }
+		} finally {
+            this.abortController = null;
+            this.setLoading(false);
+        }
 	}
 
 	async addMessage(msg: GeminiChatMessage) {
@@ -831,6 +863,40 @@ class GeminiChatView extends ItemView {
         }
 
 		const msgEl = rowEl.createDiv({ cls: `gemini-chat-message ${msg.role}` });
+
+        // Message Actions (Copy & Edit)
+        const actionsEl = msgEl.createDiv({ cls: 'gemini-chat-message-actions' });
+        
+        // Edit Button (User only)
+        if (msg.role === 'user') {
+            const editBtn = actionsEl.createDiv({ cls: 'gemini-copy-btn', attr: { 'title': 'Edit & Resend' } });
+            setIcon(editBtn, 'pencil');
+            editBtn.onClickEvent((e) => {
+                e.stopPropagation();
+                
+                // Remove auto-generated metadata (Attachments, Active Note links) from the display content
+                let textToEdit = msg.content;
+                
+                // Regex to remove **Attachments:** line (at start or end)
+                textToEdit = textToEdit.replace(/\n*\*\*Attachments:\*\*.*$/gm, '');
+                textToEdit = textToEdit.replace(/^\*\*Attachments:\*\*.*\n*/gm, '');
+
+                // Regex to remove **Active Note:** line (at start or end)
+                textToEdit = textToEdit.replace(/\n*\*\*Active Note:\*\*.*$/gm, '');
+                textToEdit = textToEdit.replace(/^\*\*Active Note:\*\*.*\n*/gm, '');
+
+                this.inputTextArea.setValue(textToEdit.trim());
+                this.inputTextArea.inputEl.focus();
+            });
+        }
+
+        // Copy Button
+        const copyBtn = actionsEl.createDiv({ cls: 'gemini-copy-btn', attr: { 'title': 'Copy message' } });
+        setIcon(copyBtn, 'copy');
+        copyBtn.onClickEvent((e) => {
+            e.stopPropagation();
+            navigator.clipboard.writeText(msg.content).then(() => new Notice('Message copied'));
+        });
 
 		// Render Main Message
 		await MarkdownRenderer.render(
@@ -880,7 +946,7 @@ class GeminiChatView extends ItemView {
 		this.messagesContainer.scrollTop = this.messagesContainer.scrollHeight;
 	}
 
-	async callGeminiAPI(history: GeminiChatMessage[], cachedContentName?: string | null): Promise<GeminiChatMessage> {
+	async callGeminiAPI(history: GeminiChatMessage[], cachedContentName?: string | null, signal?: AbortSignal): Promise<GeminiChatMessage> {
 		const { apiKey, modelName, thinkingLevel, enableGoogleSearch, enableUrlContext } = this.plugin.settings;
 		// Use v1alpha for preview features like thinking_level
 		const url = `https://generativelanguage.googleapis.com/v1alpha/models/${modelName}:generateContent`;
@@ -918,23 +984,23 @@ class GeminiChatView extends ItemView {
             body.cachedContent = cachedContentName;
         }
 
-		const response = await requestUrl({
-			url: url,
+		const response = await fetch(url, {
 			method: 'POST',
 			headers: {
 				'Content-Type': 'application/json',
 				'x-goog-api-key': apiKey
 			},
 			body: JSON.stringify(body),
-			throw: false
+            signal: signal
 		});
 
-		if (response.status >= 400) {
-			console.error('Gemini API Error Body:', response.text);
-			throw new Error(`API Error ${response.status}: ${response.text}`);
+		if (!response.ok) {
+            const errorText = await response.text();
+			console.error('Gemini API Error Body:', errorText);
+			throw new Error(`API Error ${response.status}: ${errorText}`);
 		}
 
-		const data = response.json;
+		const data = await response.json();
 		
 		// Extract parts from response to preserve thoughtSignature
 		if (data.candidates && data.candidates.length > 0 && data.candidates[0].content) {
@@ -1146,6 +1212,16 @@ class GeminiSettingTab extends PluginSettingTab {
                 .setValue(this.plugin.settings.enableUrlContext)
                 .onChange(async (value) => {
                     this.plugin.settings.enableUrlContext = value;
+                    await this.plugin.saveSettings();
+                }));
+
+        new Setting(containerEl)
+            .setName('Enable Auto Cache')
+            .setDesc('Automatically create a context cache when content exceeds 2048 tokens.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableAutoCache)
+                .onChange(async (value) => {
+                    this.plugin.settings.enableAutoCache = value;
                     await this.plugin.saveSettings();
                 }));
 	}

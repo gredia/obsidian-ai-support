@@ -1,13 +1,38 @@
 import { App, TFile, requestUrl } from "obsidian";
 
+interface CachedFile {
+    uri: string;
+    mtime: number;
+    uploadTime: number;
+}
+
 export class GeminiFileManager {
     app: App;
+    private fileCache: Map<string, CachedFile> = new Map();
 
     constructor(app: App) {
         this.app = app;
     }
 
     async uploadFile(file: TFile, apiKey: string): Promise<string> {
+        // --- Cache Check ---
+        const now = Date.now();
+        const cached = this.fileCache.get(file.path);
+
+        if (cached) {
+            // Check if file has been modified since upload
+            if (cached.mtime === file.stat.mtime) {
+                // Check if file URI is still valid (Gemini files last 48h)
+                // We use 47h to be safe
+                const ageHours = (now - cached.uploadTime) / (1000 * 60 * 60);
+                if (ageHours < 47) {
+                    console.log(`Gemini: Using cached URI for ${file.basename}`);
+                    return cached.uri;
+                }
+            }
+        }
+        // -------------------
+
         const mimeType = this.getMimeType(file.extension);
         if (!mimeType) {
             throw new Error(`Unsupported file type: ${file.extension}`);
@@ -76,6 +101,14 @@ export class GeminiFileManager {
 
             // 3. Wait for Processing (Critical for Video/Audio)
             await this.waitForProcessing(fileName, cleanApiKey);
+
+            // --- Update Cache ---
+            this.fileCache.set(file.path, {
+                uri: fileUri,
+                mtime: file.stat.mtime,
+                uploadTime: Date.now()
+            });
+            // --------------------
 
             return fileUri;
 
