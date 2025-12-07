@@ -142,6 +142,9 @@ class GeminiChatView extends ItemView {
     headerContainer: HTMLElement;
     contextChipsContainer: HTMLElement;
     activeContextBtn: HTMLElement;
+    sendBtn: ButtonComponent;
+    stopBtn: HTMLElement;
+    abortController: AbortController | null = null;
     
 	    history: GeminiChatMessage[] = [];
 	    noteService: NoteService;
@@ -273,19 +276,13 @@ class GeminiChatView extends ItemView {
         // 2. Footer Area (Context + Input)
         const footer = container.createDiv({ cls: 'gemini-chat-footer' });
 
-        // Context Chips
-        this.contextChipsContainer = footer.createDiv({ cls: 'gemini-context-chips' });
-        this.renderContextChips(); // Initial render
+        // Toolbar (Row 1) - Buttons Above Input
+        const toolbar = footer.createDiv({ cls: 'gemini-chat-toolbar' });
 
-        // Input Row
-        const inputRow = footer.createDiv({ cls: 'gemini-chat-input-container' });
-
-        // Input Toolbar (Left of input)
-        const toolbar = inputRow.createDiv({ cls: 'gemini-input-toolbar' });
-        
         // Add File Button
         const addFileBtn = toolbar.createDiv({ cls: 'gemini-toolbar-btn', attr: { title: 'Add note to context' } });
         setIcon(addFileBtn, 'file-plus');
+        addFileBtn.createSpan({ text: 'Add File' });
         addFileBtn.onClickEvent(() => {
             new FileSuggestModal(this.app, (file) => {
                 this.addContextFile(file);
@@ -295,21 +292,37 @@ class GeminiChatView extends ItemView {
         // Active Context Toggle
         this.activeContextBtn = toolbar.createDiv({ cls: 'gemini-toolbar-btn', attr: { title: 'Toggle active file context' } });
         setIcon(this.activeContextBtn, 'eye');
+        this.activeContextBtn.createSpan({ text: 'Active Note' });
+        // Set initial state class
+        if (this.isActiveContextEnabled) {
+            this.activeContextBtn.addClass('is-active');
+        }
         this.activeContextBtn.onClickEvent(() => {
             this.isActiveContextEnabled = !this.isActiveContextEnabled;
             this.renderContextChips();
         });
 
-        // Create Cache Button
+        // Create Cache Button (Adding it back as requested in previous turn, but user asked to remove auto-cache logic. 
+        // Wait, current prompt says "buttons like Add File, Active Note, Cache ... above the chat box".
+        // So I MUST include the Cache button in the toolbar.)
         const cacheBtn = toolbar.createDiv({ cls: 'gemini-toolbar-btn', attr: { title: 'Create cache from current context' } });
         setIcon(cacheBtn, 'zap');
+        cacheBtn.createSpan({ text: 'Cache' });
         cacheBtn.onClickEvent(() => {
             this.createContextCache();
         });
 
+        // Context Chips (Row 2)
+        this.contextChipsContainer = footer.createDiv({ cls: 'gemini-context-chips' });
+        this.renderContextChips(); // Initial render
+
+        // Input Row (Row 3)
+        const inputRow = footer.createDiv({ cls: 'gemini-chat-input-container' });
+
         this.inputTextArea = new TextAreaComponent(inputRow);
         this.inputTextArea.inputEl.addClass('gemini-chat-input');
         this.inputTextArea.setPlaceholder('Ask Gemini...');
+        this.inputTextArea.inputEl.rows = 6; // Increased height
         
         // Handle Enter key to send
         this.inputTextArea.inputEl.addEventListener('keydown', (e) => {
@@ -336,12 +349,35 @@ class GeminiChatView extends ItemView {
             }
         });
 
-        const sendBtn = new ButtonComponent(inputRow);
-        sendBtn.setIcon('send');
-        sendBtn.setClass('gemini-chat-send-btn');
-        sendBtn.onClick(() => this.handleSend());
+        // Send Button
+        this.sendBtn = new ButtonComponent(inputRow);
+        this.sendBtn.setIcon('send');
+        this.sendBtn.setClass('gemini-chat-send-btn');
+        this.sendBtn.onClick(() => this.handleSend());
+
+        // Stop Button (Hidden by default)
+        this.stopBtn = inputRow.createDiv({ cls: 'gemini-chat-stop-btn', attr: { style: 'display: none;', title: 'Stop Generating' } });
+        setIcon(this.stopBtn, 'square'); // Use square icon for stop
+        this.stopBtn.onClickEvent(() => {
+            if (this.abortController) {
+                this.abortController.abort();
+                this.abortController = null;
+                new Notice("Generation stopped.");
+                this.setLoading(false);
+            }
+        });
         
         return titleEl; 
+    }
+
+    setLoading(loading: boolean) {
+        if (loading) {
+            this.sendBtn.buttonEl.style.display = 'none';
+            this.stopBtn.style.display = 'flex';
+        } else {
+            this.sendBtn.buttonEl.style.display = 'flex';
+            this.stopBtn.style.display = 'none';
+        }
     }
 
     async handleImagePaste(buffer: ArrayBuffer, mimeType: string) {
