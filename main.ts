@@ -640,7 +640,7 @@ class GeminiChatView extends ItemView {
         }
     }
 
-	async handleSend() {
+		async handleSend() {
 		const text = this.inputTextArea.getValue().trim();
         // Allow sending if there are files attached even if text is empty (e.g. "describe this image")
 		if (!text && this.contextFiles.length === 0 && !this.isActiveContextEnabled) return;
@@ -653,96 +653,9 @@ class GeminiChatView extends ItemView {
 		// Clear input
 		this.inputTextArea.setValue('');
 
-        // 0. Auto-Cache Check
-        if (this.plugin.settings.enableAutoCache && !this.activeCacheName) {
-             const cachedName = await this.createContextCache(true);
-             if (cachedName) {
-                 new Notice("Context automatically cached for performance.");
-             }
-        }
+        // --- 1. Immediate UI Update (Optimistic) ---
 
-        // Prepare User Message Parts
-        const messageParts: any[] = [];
-        let contextText = "";
-
-        // Helper to process file
-        const processFile = async (file: TFile, label: string) => {
-            if (this.fileManager.isMediaFile(file)) {
-                // Upload Media
-                try {
-                    const fileUri = await this.fileManager.uploadFile(file, this.plugin.settings.apiKey);
-                    const mimeType = this.fileManager.getMimeType(file.extension) || 'application/octet-stream';
-                    messageParts.push({
-                        file_data: {
-                            mime_type: mimeType,
-                            file_uri: fileUri
-                        }
-                    });
-                    new Notice(`Uploaded ${file.basename}`);
-                } catch (err) {
-                    console.error(`Failed to upload ${file.path}:`, err);
-                    new Notice(`Failed to upload ${file.basename}: ${err.message}`);
-                }
-            } else {
-                // Read Text
-                try {
-                    const content = await this.app.vault.read(file);
-                    contextText += `\n\n--- Content of ${label} [[${file.path}]] ---\n${content}\n--- End of ${label} ---\n`;
-                } catch (err) {
-                    console.error(`Failed to read ${file.path}:`, err);
-                }
-            }
-        };
-
-        // 1. Process Active File
-        if (this.isActiveContextEnabled && !this.activeCacheName) {
-            const activeFile = this.app.workspace.getActiveFile();
-            if (activeFile) {
-                await processFile(activeFile, "Active File");
-            }
-        }
-
-        // 2. Process Manual Context Files
-        if (!this.activeCacheName) {
-            for (const file of this.contextFiles) {
-                 await processFile(file, "Selected File");
-            }
-        }
-
-        // 3. Process Inline Links (Text only for now, unless we want to recurse upload?)
-        // Keeping existing link logic for text notes
-        if (text) {
-            const linkRegex = /\[\[([^\]]+)\]\]/g;
-            const matches = Array.from(text.matchAll(linkRegex));
-            if (matches.length > 0) {
-                new Notice(`Reading ${matches.length} linked text note(s)...`);
-                for (const match of matches) {
-                    const linkContent = match[1];
-                    const cleanLink = linkContent.split('|')[0];
-                    const resolution = await this.noteService.resolveNoteFile(cleanLink);
-                    if (resolution.type === 'resolved') {
-                        const content = await this.noteService.readNoteText(resolution.file);
-                        contextText += `\n\n--- Content of Linked Note [[${cleanLink}]] ---\n${content}\n--- End of Linked Note ---\n`;
-                    }
-                }
-            }
-        }
-
-        // Final Assembly
-        // Combine user text + context text into one text part
-        const finalUserText = (text + "\n" + contextText).trim();
-        
-        if (finalUserText) {
-            messageParts.push({ text: finalUserText });
-        }
-
-        if (messageParts.length === 0) {
-            new Notice("No content to send.");
-            return;
-        }
-
-        // Generate content display text (what the user sees in the chat)
-        // If there are context files, list them as links (excluding images which are shown separately)
+        // Generate content display text
         let displayContent = text;
         const nonImageFiles = this.contextFiles.filter(f => !this.fileManager.isImage(f));
         const imageFiles = this.contextFiles.filter(f => this.fileManager.isImage(f));
@@ -769,41 +682,33 @@ class GeminiChatView extends ItemView {
             displayContent = "[Empty message]";
         }
 
-		// Add User Message
+		// Add User Message to UI immediately
 		const userMsg: GeminiChatMessage = {
 			role: 'user',
 			content: displayContent,
-			parts: messageParts,
+			parts: [], // Will be filled later
             images: imagePaths
 		};
 		this.addMessage(userMsg);
-
         this.history.push(userMsg);
         
-        // Keep context files selected after sending, as requested.
-        // this.contextFiles = []; 
-        // this.renderContextChips();
-        
-        // Save after user message
-        try {
-            const isNewChatAndFirstUserMessage = this.currentChatFile === null && this.history.length === 1; // Check after pushing userMsg
-            const savedFile = await this.chatHistoryService.saveChat(
-                this.plugin.settings.chatHistoryFolder,
-                this.history.map(m => ({ role: m.role, content: m.content })),
-                this.currentChatFile || undefined,
-                isNewChatAndFirstUserMessage ? text : undefined
-            );
-            this.currentChatFile = savedFile;
-            
-            // Update title if it was "New Chat" or first user message of a new chat
+        // Save chat history immediately
+        this.chatHistoryService.saveChat(
+            this.plugin.settings.chatHistoryFolder,
+            this.history.map(m => ({ role: m.role, content: m.content })),
+            this.currentChatFile || undefined,
+            (this.currentChatFile === null && this.history.length === 1) ? text : undefined
+        ).then(file => {
+            this.currentChatFile = file;
             const titleEl = this.headerContainer.querySelector('.gemini-chat-title');
             if (titleEl && this.currentChatFile) {
                 titleEl.setText(this.currentChatFile.replace(/\.md$/, ''));
             }
-            
-        } catch (e) {
-            console.error("Failed to save chat:", e);
-        }
+        }).catch(err => console.error("Failed to save chat:", err));
+
+        // Clear context selection in UI (files are already captured in local vars)
+        this.contextFiles = [];
+        this.renderContextChips();
 
 		// Show Loading
 		const loadingEl = this.messagesContainer.createDiv({ cls: 'gemini-chat-loading' });
@@ -813,8 +718,100 @@ class GeminiChatView extends ItemView {
         this.abortController = new AbortController();
         this.setLoading(true);
 
-		try {
-			// Call API
+        // --- 2. Heavy Processing (Uploads & Context) ---
+        
+        try {
+            // Auto-Cache Check
+            if (this.plugin.settings.enableAutoCache && !this.activeCacheName) {
+                const cachedName = await this.createContextCache(true);
+                if (cachedName) {
+                    new Notice("Context automatically cached for performance.");
+                }
+            }
+
+            const messageParts: any[] = [];
+            let contextText = "";
+
+            // Helper to process file
+            const processFile = async (file: TFile, label: string) => {
+                if (this.fileManager.isMediaFile(file)) {
+                    // Upload Media
+                    try {
+                        const fileUri = await this.fileManager.uploadFile(file, this.plugin.settings.apiKey);
+                        const mimeType = this.fileManager.getMimeType(file.extension) || 'application/octet-stream';
+                        messageParts.push({
+                            file_data: {
+                                mime_type: mimeType,
+                                file_uri: fileUri
+                            }
+                        });
+                        if (!this.activeCacheName) new Notice(`Uploaded ${file.basename}`);
+                    } catch (err) {
+                        throw new Error(`Failed to upload ${file.basename}: ${err.message}`);
+                    }
+                } else {
+                    // Read Text
+                    try {
+                        const content = await this.app.vault.read(file);
+                        contextText += `\n\n--- Content of ${label} [[${file.path}]] ---\n${content}\n--- End of ${label} ---\n`;
+                    } catch (err) {
+                        console.error(`Failed to read ${file.path}:`, err);
+                    }
+                }
+            };
+
+            // 1. Process Active File
+            if (this.isActiveContextEnabled && !this.activeCacheName) {
+                const activeFile = this.app.workspace.getActiveFile();
+                if (activeFile) {
+                    await processFile(activeFile, "Active File");
+                }
+            }
+
+            // 2. Process Manual Context Files (using captured list)
+            if (!this.activeCacheName) {
+                // Re-use imageFiles and nonImageFiles lists captured earlier? 
+                // No, iterate original list which we need to keep locally since we cleared this.contextFiles
+                // Wait, I cleared `this.contextFiles` above. I need to use a local copy.
+                // Re-using `imageFiles` and `nonImageFiles` arrays is safer.
+                const allFiles = [...nonImageFiles, ...imageFiles]; // Combine them back or iterate separately
+                for (const file of allFiles) {
+                    await processFile(file, "Selected File");
+                }
+            }
+
+            // 3. Process Inline Links
+            if (text) {
+                const linkRegex = /\[\[([^\]]+)\]\]/g;
+                const matches = Array.from(text.matchAll(linkRegex));
+                if (matches.length > 0) {
+                    new Notice(`Reading ${matches.length} linked text note(s)...`);
+                    for (const match of matches) {
+                        const linkContent = match[1];
+                        const cleanLink = linkContent.split('|')[0];
+                        const resolution = await this.noteService.resolveNoteFile(cleanLink);
+                        if (resolution.type === 'resolved') {
+                            const content = await this.noteService.readNoteText(resolution.file);
+                            contextText += `\n\n--- Content of Linked Note [[${cleanLink}]] ---\n${content}\n--- End of Linked Note ---\n`;
+                        }
+                    }
+                }
+            }
+
+            // Final Assembly
+            const finalUserText = (text + "\n" + contextText).trim();
+            if (finalUserText) {
+                messageParts.push({ text: finalUserText });
+            }
+
+            if (messageParts.length === 0) {
+                throw new Error("No content to send (upload failed or empty).");
+            }
+
+            // Update the user message object with the actual parts
+            userMsg.parts = messageParts;
+
+            // --- 3. Call API ---
 			const responseMsg = await this.callGeminiAPI(this.history, this.activeCacheName, this.abortController.signal);
 
 			// Remove Loading
@@ -833,12 +830,18 @@ class GeminiChatView extends ItemView {
             this.currentChatFile = savedFile;
 
 		} catch (error) {
+            loadingEl.remove();
+            
             if (error.name === 'AbortError') {
-                loadingEl.setText('Generation stopped.');
+                new Notice('Generation stopped.');
             } else {
                 console.error('Gemini Error:', error);
-                loadingEl.setText(`Error: ${error.message}`);
                 new Notice(`Gemini Error: ${error.message}`);
+                // Add error message to chat
+                this.addMessage({ 
+                    role: 'model', 
+                    content: `❌ **Error:** ${error.message}\n\ngeneration aborted.` 
+                });
             }
 		} finally {
             this.abortController = null;
