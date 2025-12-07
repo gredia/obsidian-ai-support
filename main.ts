@@ -596,6 +596,12 @@ class GeminiChatView extends ItemView {
         const titleEl = this.initializeChatUI(container);
         if (titleEl) titleEl.setText(file.basename);
 
+        // Clear active cache from previous session if any
+        if (this.activeCacheName) {
+            await this.cacheManager.deleteCache(this.plugin.settings.apiKey, this.activeCacheName);
+            this.activeCacheName = null;
+        }
+
         // Reset context when loading old chat (or maybe we should persist it? keeping simple for now)
         this.contextFiles = [];
         this.isActiveContextEnabled = true;
