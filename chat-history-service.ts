@@ -3,6 +3,9 @@ import { App, TFile, TFolder, normalizePath, Notice } from "obsidian";
 export interface ChatMessage {
     role: "user" | "model";
     content: string;
+    parts?: any[]; // For storing API parts including thoughtSignature
+    thought?: string; // For storing thinking process text
+    thoughtSignature?: string; // Explicitly store signature if extracted
 }
 
 export class ChatHistoryService {
@@ -116,8 +119,30 @@ ${chatContent}`;
     private formatChatContent(messages: ChatMessage[]): string {
         return messages.map(msg => {
             const role = msg.role === 'user' ? 'user' : 'ai'; // Map model to ai for compatibility
-            const timestamp = new Date().toLocaleString(); // We might want to store actual timestamp in message if available
-            return `**${role}**: ${msg.content}\n[Timestamp: ${timestamp}]`;
+            const timestamp = new Date().toLocaleString(); 
+            
+            // Serialize metadata (parts, thought, signature)
+            // Filter parts to avoid saving duplicate text content if possible, or just save critical parts
+            // Saving full parts array is safest for reconstructing API calls
+            const metadata: any = {};
+            if (msg.parts) metadata.parts = msg.parts;
+            if (msg.thought) metadata.thought = msg.thought;
+            if (msg.thoughtSignature) metadata.thoughtSignature = msg.thoughtSignature;
+
+            let textContent = `**${role}**: ${msg.content}\n[Timestamp: ${timestamp}]`;
+            
+            // Append metadata as hidden HTML comment if not empty
+            if (Object.keys(metadata).length > 0) {
+                 // Base64 encode to avoid conflict with markdown syntax or comment terminators
+                 const json = JSON.stringify(metadata);
+                 // Simple masking to prevent accidental comment closure "-->" inside json
+                 // Base64 is cleaner but plain text is more readable for debug. 
+                 // Let's use Base64 for robustness.
+                 const b64 = btoa(unescape(encodeURIComponent(json)));
+                 textContent += `\n<!-- gemini-metadata: ${b64} -->`;
+            }
+            
+            return textContent;
         }).join('\n\n');
     }
 
@@ -140,11 +165,42 @@ ${chatContent}`;
             const role = match[1] === 'ai' ? 'model' : 'user';
             let text = match[2].trim();
             
-            // Remove Timestamp line if present at the end
+            let parts: any[] | undefined;
+            let thought: string | undefined;
+            let thoughtSignature: string | undefined;
+
+            // Extract Metadata Comment
+            const metadataRegex = /\n<!-- gemini-metadata: (.*?) -->$/;
+            const metadataMatch = text.match(metadataRegex);
+            
+            if (metadataMatch) {
+                try {
+                    const b64 = metadataMatch[1];
+                    const json = decodeURIComponent(escape(atob(b64)));
+                    const metadata = JSON.parse(json);
+                    
+                    if (metadata.parts) parts = metadata.parts;
+                    if (metadata.thought) thought = metadata.thought;
+                    if (metadata.thoughtSignature) thoughtSignature = metadata.thoughtSignature;
+
+                    // Remove metadata from display text
+                    text = text.replace(metadataRegex, '').trim();
+                } catch (e) {
+                    console.error("Failed to parse gemini metadata:", e);
+                }
+            }
+
+            // Remove Timestamp line if present at the end (after metadata removal)
             const timestampRegex = /\n\[Timestamp: .*?\]$/;
             text = text.replace(timestampRegex, '').trim();
 
-            messages.push({ role: role as 'user' | 'model', content: text });
+            messages.push({ 
+                role: role as 'user' | 'model', 
+                content: text,
+                parts: parts,
+                thought: thought,
+                thoughtSignature: thoughtSignature
+            });
         }
 
         return messages;

@@ -11,9 +11,9 @@
     display: flex;
     align-items: center;
     justify-content: space-between;
-    padding: 0 0 10px 0;
+    padding: 0 0 5px 0;
     border-bottom: 1px solid var(--background-modifier-border);
-    margin-bottom: 10px;
+    margin-bottom: 5px;
     flex-shrink: 0;
 }
 
@@ -61,7 +61,7 @@
     overflow-y: auto;
     display: flex;
     flex-direction: column;
-    gap: 15px;
+    gap: 10px;
     padding-bottom: 10px;
 }
 
@@ -86,7 +86,7 @@
 /* Message Bubbles */
 .gemini-chat-message {
     max-width: 85%;
-    padding: 10px 14px 32px 14px; /* Increased bottom padding for actions */
+    padding: 10px 14px 28px 14px; /* Reduced bottom padding */
     border-radius: 10px;
     font-size: 0.95em;
     line-height: 1.5;
@@ -96,7 +96,7 @@
 
 .gemini-chat-message-actions {
     position: absolute;
-    bottom: 6px;
+    bottom: 4px;
     right: 6px;
     top: auto;
     opacity: 1; /* Always visible */
@@ -112,7 +112,7 @@
 
 .gemini-copy-btn {
     cursor: pointer;
-    padding: 4px;
+    padding: 2px 4px;
     border-radius: 4px;
     background-color: var(--background-primary);
     border: 1px solid var(--background-modifier-border);
@@ -166,8 +166,8 @@
 .gemini-chat-footer {
     display: flex;
     flex-direction: column;
-    gap: 8px;
-    padding-top: 10px;
+    gap: 5px;
+    padding-top: 5px;
     border-top: 1px solid var(--background-modifier-border);
     flex-shrink: 0;
 }
@@ -291,9 +291,9 @@
 .gemini-chat-toolbar {
     display: flex;
     align-items: center;
-    gap: 10px;
+    gap: 8px;
     flex-wrap: wrap;
-    margin-bottom: 5px;
+    margin-bottom: 0;
 }
 
 .gemini-toolbar-btn {
@@ -386,4 +386,39 @@
 .gemini-history-item-date {
     font-size: 0.8em;
     color: var(--text-muted);
+}
+
+/* Thinking Process */
+.gemini-thinking-process {
+    margin-bottom: 10px;
+    border-left: 2px solid var(--interactive-accent);
+    padding-left: 10px;
+}
+
+.gemini-thinking-process summary {
+    cursor: pointer;
+    font-size: 0.85em;
+    color: var(--text-muted);
+    font-style: italic;
+    user-select: none;
+    outline: none;
+}
+
+.gemini-thinking-process summary:hover {
+    color: var(--text-normal);
+}
+
+.gemini-thinking-content {
+    margin-top: 5px;
+    font-size: 0.9em;
+    color: var(--text-muted);
+    background-color: var(--background-secondary-alt);
+    padding: 8px;
+    border-radius: 4px;
+    white-space: pre-wrap;
+}
+
+/* Dark mode adjustments for thinking content if needed */
+.theme-dark .gemini-thinking-content {
+    background-color: rgba(255, 255, 255, 0.05);
 }
