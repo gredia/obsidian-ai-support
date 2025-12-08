@@ -555,8 +555,14 @@ class GeminiChatView extends ItemView {
             return cache.name;
         } catch (error) {
             const msg = `Failed to create cache: ${error.message}`;
-            console.error(msg);
-            if (!silent) new Notice(msg);
+            console.error("Context Cache Creation Error:", error);
+            // Even in silent mode, log to console. 
+            // If it's a 400 error (Invalid Argument), it might be configuration issue.
+            if (!silent || error.message.includes('400')) {
+                 // Optionally show notice for 400 even in silent mode if it's critical?
+                 // For now, let's stick to console for silent, but ensure it's logged.
+                 if (!silent) new Notice(msg);
+            }
             return null;
         }
     }

@@ -29,12 +29,15 @@ export class GeminiCacheManager {
         this.app = app;
     }
 
-    private getBaseUrl(): string {
-        return "https://generativelanguage.googleapis.com/v1beta/cachedContents";
+    private getBaseUrl(apiVersion: string = 'v1beta'): string {
+        return `https://generativelanguage.googleapis.com/${apiVersion}/cachedContents`;
     }
 
     async createCache(apiKey: string, config: CacheConfig): Promise<CachedContent> {
-        const url = this.getBaseUrl();
+        // Determine API version based on model
+        const isGemini3 = config.model.includes('gemini-3');
+        const apiVersion = isGemini3 ? 'v1alpha' : 'v1beta';
+        const url = this.getBaseUrl(apiVersion);
         
         try {
             const response = await requestUrl({
