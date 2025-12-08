@@ -785,7 +785,11 @@ class GeminiChatView extends ItemView {
             }
 
             if (messageParts.length === 0) {
-                throw new Error("No content to send (upload failed or empty).");
+                if (this.activeCacheName && (this.contextFiles.length > 0 || this.isActiveContextEnabled)) {
+                    messageParts.push({ text: "Please review the provided context files." });
+                } else {
+                    throw new Error("No content to send (upload failed or empty).");
+                }
             }
 
             userMsg.parts = messageParts;
@@ -870,7 +874,10 @@ class GeminiChatView extends ItemView {
         setIcon(copyBtn, 'copy');
         copyBtn.onClickEvent((e) => {
             e.stopPropagation();
-            navigator.clipboard.writeText(msg.content).then(() => new Notice('Message copied'));
+            let textToCopy = msg.content;
+            textToCopy = textToCopy.replace(/\n*\*\*Active Note:\*\*.*$/gm, '');
+            textToCopy = textToCopy.replace(/^\*\*Active Note:\*\*.*\n*/gm, '');
+            navigator.clipboard.writeText(textToCopy.trim()).then(() => new Notice('Message copied'));
         });
 
         if (msg.thought) {
