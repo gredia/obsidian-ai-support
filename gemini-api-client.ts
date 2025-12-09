@@ -7,7 +7,6 @@ export class GeminiApiClient {
         history: GeminiChatMessage[], 
         modelName: string, 
         settings: GeminiPluginSettings,
-        cachedContentName?: string | null, 
         signal?: AbortSignal
     ): Promise<GeminiChatMessage> {
         const { apiKey, thinkingLevel, enableGoogleSearch, enableUrlContext } = settings;
@@ -55,12 +54,8 @@ export class GeminiApiClient {
         }
 
         // Tools cannot be used in generateContent when cachedContent is present
-        if (tools.length > 0 && !cachedContentName) {
+        if (tools.length > 0) {
             body.tools = tools;
-        }
-
-        if (cachedContentName) {
-            body.cachedContent = cachedContentName;
         }
 
         const response = await fetch(url, {

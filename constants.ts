@@ -4,10 +4,10 @@ export const DEFAULT_SETTINGS: GeminiPluginSettings = {
     apiKey: '',
     modelName: 'gemini-3-pro-preview',
     thinkingLevel: 'high',
+    enableThinking: false,
     chatHistoryFolder: 'Gemini Chats',
     enableGoogleSearch: false,
     enableUrlContext: false,
-    enableAutoCache: false,
     mediaResolution: 'auto'
 };
 

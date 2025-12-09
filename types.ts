@@ -2,10 +2,10 @@ export interface GeminiPluginSettings {
     apiKey: string;
     modelName: string;
     thinkingLevel: 'low' | 'high';
+    enableThinking: boolean; // For Gemini 2.5 models
     chatHistoryFolder: string;
     enableGoogleSearch: boolean;
     enableUrlContext: boolean;
-    enableAutoCache: boolean;
     mediaResolution: 'auto' | 'low' | 'medium' | 'high';
 }
 
