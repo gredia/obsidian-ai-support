@@ -6,9 +6,18 @@ interface CachedFile {
     uploadTime: number;
 }
 
+interface ExplicitCacheEntry {
+    name: string;
+    expireTime: string;
+    modelName: string;
+    fileUri: string;
+}
+
 export class GeminiFileManager {
     app: App;
     private fileCache: Map<string, CachedFile> = new Map();
+    // Key: filePath + "::" + modelName
+    private explicitCache: Map<string, ExplicitCacheEntry> = new Map();
 
     constructor(app: App) {
         this.app = app;
@@ -115,6 +124,116 @@ export class GeminiFileManager {
         } catch (error) {
             console.error("File upload error:", error);
             throw error;
+        }
+    }
+
+    /**
+     * Ensures an explicit cache exists for the given file and model.
+     * Returns the cache name if successful, or null if caching failed/skipped (e.g. file too small).
+     */
+    async ensureExplicitCache(
+        file: TFile, 
+        fileUri: string, 
+        mimeType: string, 
+        modelName: string, 
+        apiKey: string,
+        settings: { enableGoogleSearch: boolean, enableUrlContext: boolean } // Add settings
+    ): Promise<string | null> {
+        // Cache key should now include tool usage as it changes the cache definition
+        const toolKey = `${settings.enableGoogleSearch ? 'G' : ''}${settings.enableUrlContext ? 'U' : ''}`;
+        const cacheKey = `${file.path}::${modelName}::${toolKey}`;
+        
+        const cached = this.explicitCache.get(cacheKey);
+        
+        // 1. Check if we have a valid cache in memory
+        if (cached && cached.fileUri === fileUri) { // Ensure URI matches (re-upload invalidates old cache logic)
+            const expireDate = new Date(cached.expireTime);
+            // Add a buffer (e.g., 5 mins) to avoid using expiring cache
+            if (expireDate.getTime() > Date.now() + 5 * 60 * 1000) {
+                console.log(`Gemini: Using existing explicit cache ${cached.name} for ${modelName}`);
+                return cached.name;
+            } else {
+                console.log(`Gemini: Explicit cache ${cached.name} expired or expiring soon.`);
+                this.explicitCache.delete(cacheKey);
+            }
+        }
+
+        // 2. Create new cache
+        console.log(`Gemini: Creating explicit cache for ${file.basename} on ${modelName}...`);
+        
+        // Use v1beta for cachedContents even for gemini-3 models as per API docs
+        const url = `https://generativelanguage.googleapis.com/v1beta/cachedContents`;
+        
+        // Standardize model name for cache creation (must be "models/gemini-...")
+        const fullModelName = modelName.startsWith('models/') ? modelName : `models/${modelName}`;
+
+        const tools: any[] = [];
+        if (settings.enableGoogleSearch) {
+            tools.push({ google_search: {} });
+        }
+        if (settings.enableUrlContext) {
+            tools.push({ url_context: {} });
+        }
+
+        const body: any = {
+            model: fullModelName,
+            contents: [{
+                parts: [{
+                    file_data: {
+                        mime_type: mimeType,
+                        file_uri: fileUri
+                    }
+                }],
+                role: 'user'
+            }],
+            ttl: '3600s' // Default 1 hour
+        };
+
+        if (tools.length > 0) {
+            body.tools = tools;
+        }
+
+        try {
+            const response = await requestUrl({
+                url: url,
+                method: 'POST',
+                headers: {
+                    'Content-Type': 'application/json',
+                    'x-goog-api-key': apiKey
+                },
+                body: JSON.stringify(body),
+                throw: false // Handle errors manually
+            });
+
+            if (response.status >= 400) {
+                const errorText = response.text;
+                // If error is related to token count (InvalidArgument), log and return null
+                // We assume 400 with "InvalidArgument" usually means < min tokens
+                if (response.status === 400 && errorText.includes("InvalidArgument")) {
+                    console.warn(`Gemini: Failed to cache ${file.basename} (likely too small): ${errorText}`);
+                    return null;
+                }
+                throw new Error(`Cache creation failed ${response.status}: ${errorText}`);
+            }
+
+            const data = response.json;
+            const cacheName = data.name;
+            const expireTime = data.expireTime;
+
+            console.log(`Gemini: Created explicit cache ${cacheName}`);
+
+            this.explicitCache.set(cacheKey, {
+                name: cacheName,
+                expireTime: expireTime,
+                modelName: modelName,
+                fileUri: fileUri
+            });
+
+            return cacheName;
+
+        } catch (error) {
+            console.error("Explicit caching error:", error);
+            return null; // Fallback to standard file usage
         }
     }
 

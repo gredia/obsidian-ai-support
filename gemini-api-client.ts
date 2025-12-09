@@ -7,7 +7,8 @@ export class GeminiApiClient {
         history: GeminiChatMessage[], 
         modelName: string, 
         settings: GeminiPluginSettings,
-        signal?: AbortSignal
+        signal?: AbortSignal,
+        cachedContentName?: string
     ): Promise<GeminiChatMessage> {
         const { apiKey, thinkingLevel, enableGoogleSearch, enableUrlContext } = settings;
         
@@ -38,6 +39,10 @@ export class GeminiApiClient {
             generationConfig: {}
         };
 
+        if (cachedContentName) {
+            body.cachedContent = cachedContentName;
+        }
+
         // Thinking Config
         if (isGemini3) {
             // Gemini 3: thinking_config with include_thoughts and thinking_level
@@ -54,7 +59,8 @@ export class GeminiApiClient {
         }
 
         // Tools cannot be used in generateContent when cachedContent is present
-        if (tools.length > 0) {
+        // They must be defined in the CachedContent resource itself
+        if (tools.length > 0 && !cachedContentName) {
             body.tools = tools;
         }
 

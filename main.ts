@@ -549,13 +549,59 @@ class GeminiChatView extends ItemView {
         try {
             const messageParts: any[] = [];
             let contextText = "";
+            let cachedContentName: string | undefined = undefined;
 
-            const processFile = async (file: TFile, label: string) => {
-                if (this.fileManager.isMediaFile(file)) {
-                    try {
-                        const fileUri = await this.fileManager.uploadFile(file, this.plugin.settings.apiKey);
-                        const mimeType = this.fileManager.getMimeType(file.extension) || 'application/octet-stream';
+            const nonImageFiles = this.contextFiles.filter(f => !this.fileManager.isImage(f));
+            const imageFiles = this.contextFiles.filter(f => this.fileManager.isImage(f));
+            const allFiles = [...nonImageFiles, ...imageFiles];
+
+            // Filter for media files that need uploading
+            const mediaFiles = allFiles.filter(f => this.fileManager.isMediaFile(f));
+            // Filter for text files
+            const textFiles = allFiles.filter(f => !this.fileManager.isMediaFile(f));
+
+            if (this.isActiveContextEnabled) {
+                const activeFile = this.app.workspace.getActiveFile();
+                if (activeFile) {
+                    if (this.fileManager.isMediaFile(activeFile)) {
+                        mediaFiles.unshift(activeFile);
+                    } else {
+                        textFiles.unshift(activeFile);
+                    }
+                }
+            }
+
+            // Process Media Files (Upload & Cache)
+            // Strategy: Try to explicitly cache the FIRST media file. 
+            // If successful, use it as cachedContent. Subsequent files are standard file_data.
+            for (let i = 0; i < mediaFiles.length; i++) {
+                const file = mediaFiles[i];
+                try {
+                    const fileUri = await this.fileManager.uploadFile(file, this.plugin.settings.apiKey);
+                    const mimeType = this.fileManager.getMimeType(file.extension) || 'application/octet-stream';
+                    
+                    let useExplicitCache = false;
+
+                    // Only attempt explicit caching for the FIRST file, and only if no cache is set yet
+                    if (i === 0 && !cachedContentName) {
+                        const cacheName = await this.fileManager.ensureExplicitCache(
+                            file, 
+                            fileUri, 
+                            mimeType, 
+                            this.currentModel, 
+                            this.plugin.settings.apiKey,
+                            this.plugin.settings // Pass settings for tool config
+                        );
                         
+                        if (cacheName) {
+                            cachedContentName = cacheName;
+                            useExplicitCache = true;
+                            new Notice(`Using explicit cache for ${file.basename}`);
+                        }
+                    }
+
+                    // If NOT using explicit cache (either failed, or not the first file), add as file_data part
+                    if (!useExplicitCache) {
                         const part: any = {
                             file_data: {
                                 mime_type: mimeType,
@@ -568,33 +614,30 @@ class GeminiChatView extends ItemView {
                                 level: `media_resolution_${this.plugin.settings.mediaResolution}`
                             };
                         }
-
                         messageParts.push(part);
-                        
-                        new Notice(`Uploaded ${file.basename}`);
-                    } catch (err) {
-                        throw new Error(`Failed to upload ${file.basename}: ${err.message}`);
+                    } else {
+                        // If using explicit cache, the file is already in the cache context.
+                        // We DO NOT add it to messageParts.
                     }
-                } else {
-                    try {
-                        const content = await this.app.vault.read(file);
-                        contextText += `\n\n--- Content of ${label} [[${file.path}]] ---\n${content}\n--- End of ${label} ---\n`;
-                    } catch (err) {
-                        console.error(`Failed to read ${file.path}:`, err);
-                    }
-                }
-            };
 
-            if (this.isActiveContextEnabled) {
-                const activeFile = this.app.workspace.getActiveFile();
-                if (activeFile) {
-                    await processFile(activeFile, "Active File");
+                    if (!useExplicitCache) {
+                        new Notice(`Uploaded ${file.basename}`);
+                    }
+
+                } catch (err) {
+                    throw new Error(`Failed to upload ${file.basename}: ${err.message}`);
                 }
             }
 
-            const allFiles = [...nonImageFiles, ...imageFiles];
-            for (const file of allFiles) {
-                await processFile(file, "Selected File");
+            // Process Text Files
+            for (const file of textFiles) {
+                try {
+                    const content = await this.app.vault.read(file);
+                    const label = file === this.app.workspace.getActiveFile() ? "Active Note" : "Selected Note";
+                    contextText += `\n\n--- Content of ${label} [[${file.path}]] ---\n${content}\n--- End of ${label} ---\n`;
+                } catch (err) {
+                    console.error(`Failed to read ${file.path}:`, err);
+                }
             }
 
             if (text) {
@@ -619,7 +662,7 @@ class GeminiChatView extends ItemView {
                 messageParts.push({ text: finalUserText });
             }
 
-            if (messageParts.length === 0) {
+            if (messageParts.length === 0 && !cachedContentName) {
                 throw new Error("No content to send (upload failed or empty).");
             }
 
@@ -629,7 +672,8 @@ class GeminiChatView extends ItemView {
                 this.history, 
                 this.currentModel, 
                 this.plugin.settings,
-                this.abortController.signal
+                this.abortController.signal,
+                cachedContentName // Pass the cache name if available
             );
 
 			loadingEl.remove();
