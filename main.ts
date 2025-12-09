@@ -574,6 +574,9 @@ class GeminiChatView extends ItemView {
             }
         }).catch(err => console.error("Failed to save chat:", err));
 
+        // Capture selected files before clearing the context
+        const selectedFiles = [...this.contextFiles];
+
         this.contextFiles = [];
         this.renderContextChips();
 
@@ -589,25 +592,29 @@ class GeminiChatView extends ItemView {
             let contextText = "";
             let cachedContentName: string | undefined = undefined;
 
-            const nonImageFiles = this.contextFiles.filter(f => !this.fileManager.isImage(f));
-            const imageFiles = this.contextFiles.filter(f => this.fileManager.isImage(f));
-            const allFiles = [...nonImageFiles, ...imageFiles];
+            // --- 1. Collect & Deduplicate Files ---
+            const filesToProcess: TFile[] = [];
+            const processedPaths = new Set<string>();
+            const activeFile = this.app.workspace.getActiveFile();
 
-            // Filter for media files that need uploading
-            const mediaFiles = allFiles.filter(f => this.fileManager.isMediaFile(f));
-            // Filter for text files
-            const textFiles = allFiles.filter(f => !this.fileManager.isMediaFile(f));
+            // Priority 1: Active File (if enabled)
+            if (this.isActiveContextEnabled && activeFile) {
+                filesToProcess.push(activeFile);
+                processedPaths.add(activeFile.path);
+            }
 
-            if (this.isActiveContextEnabled) {
-                const activeFile = this.app.workspace.getActiveFile();
-                if (activeFile) {
-                    if (this.fileManager.isMediaFile(activeFile)) {
-                        mediaFiles.unshift(activeFile);
-                    } else {
-                        textFiles.unshift(activeFile);
-                    }
+            // Priority 2: Selected Files (Add File)
+            // Ensure we maintain the order of selectedFiles
+            for (const file of selectedFiles) {
+                if (!processedPaths.has(file.path)) {
+                    filesToProcess.push(file);
+                    processedPaths.add(file.path);
                 }
             }
+
+            // --- 2. Categorize Files ---
+            const mediaFiles = filesToProcess.filter(f => this.fileManager.isMediaFile(f));
+            const textFiles = filesToProcess.filter(f => !this.fileManager.isMediaFile(f));
 
             // Process Media Files (Upload & Cache)
             // Strategy: Try to explicitly cache the FIRST media file. 
@@ -671,7 +678,8 @@ class GeminiChatView extends ItemView {
             for (const file of textFiles) {
                 try {
                     const content = await this.app.vault.read(file);
-                    const label = file === this.app.workspace.getActiveFile() ? "Active Note" : "Selected Note";
+                    // Use the captured activeFile for comparison
+                    const label = (activeFile && file.path === activeFile.path) ? "Active Note" : "Selected Note";
                     contextText += `\n\n--- Content of ${label} [[${file.path}]] ---\n${content}\n--- End of ${label} ---\n`;
                 } catch (err) {
                     console.error(`Failed to read ${file.path}:`, err);
