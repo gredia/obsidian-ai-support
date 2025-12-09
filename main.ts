@@ -574,11 +574,12 @@ class GeminiChatView extends ItemView {
             }
         }).catch(err => console.error("Failed to save chat:", err));
 
-        // Capture selected files before clearing the context
+        // Capture selected files (no longer clearing context to persist selection)
         const selectedFiles = [...this.contextFiles];
-
-        this.contextFiles = [];
-        this.renderContextChips();
+        
+        // We do NOT clear contextFiles here anymore based on user request.
+        // this.contextFiles = []; 
+        // this.renderContextChips(); 
 
 		const loadingEl = this.messagesContainer.createDiv({ cls: 'gemini-chat-loading' });
 		loadingEl.setText('Gemini is thinking...');
