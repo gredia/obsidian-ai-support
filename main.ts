@@ -108,6 +108,7 @@ class GeminiChatView extends ItemView {
     headerContainer: HTMLElement;
     contextChipsContainer: HTMLElement;
     activeContextBtn: HTMLElement;
+    thinkingToggleBtn: HTMLElement; // New Toggle Button
     sendBtn: ButtonComponent;
     stopBtn: HTMLElement;
     abortController: AbortController | null = null;
@@ -123,6 +124,7 @@ class GeminiChatView extends ItemView {
     // Context State
     contextFiles: TFile[] = [];
     isActiveContextEnabled: boolean = true;
+    isThinkingEnabled: boolean = true; // Local state for thinking
     
     constructor(leaf: WorkspaceLeaf, plugin: GeminiPlugin) {
         super(leaf);
@@ -132,6 +134,7 @@ class GeminiChatView extends ItemView {
         this.fileManager = new GeminiFileManager(plugin.app);
         this.apiClient = new GeminiApiClient();
         this.currentModel = this.plugin.settings.modelName;
+        this.isThinkingEnabled = this.plugin.settings.enableThinking; // Init from settings
     }
 
 	getViewType() {
@@ -270,13 +273,46 @@ class GeminiChatView extends ItemView {
             this.renderContextChips();
         });
 
-        const modelSelectorContainer = toolbar.createDiv({ cls: 'gemini-model-selector-container' });
-        const dropdown = new DropdownComponent(modelSelectorContainer);
+        // --- Model Selector & Thinking Toggle ---
+        const controlsContainer = toolbar.createDiv({ cls: 'gemini-controls-container', attr: { style: 'display: flex; align-items: center; gap: 8px; margin-left: auto;' } });
+
+        // Thinking Toggle (Visible only for non-Gemini 3 models)
+        this.thinkingToggleBtn = controlsContainer.createDiv({ cls: 'gemini-toolbar-btn gemini-thinking-toggle', attr: { title: 'Toggle Thinking (Gemini 2.5)' } });
+        // Initial Icon state
+        setIcon(this.thinkingToggleBtn, this.isThinkingEnabled ? 'brain-circuit' : 'brain'); 
+        if (this.isThinkingEnabled) this.thinkingToggleBtn.addClass('is-active');
+        
+        this.thinkingToggleBtn.onClickEvent(() => {
+            this.isThinkingEnabled = !this.isThinkingEnabled;
+            if (this.isThinkingEnabled) {
+                this.thinkingToggleBtn.addClass('is-active');
+                setIcon(this.thinkingToggleBtn, 'brain-circuit');
+                new Notice('Thinking enabled');
+            } else {
+                this.thinkingToggleBtn.removeClass('is-active');
+                setIcon(this.thinkingToggleBtn, 'brain');
+                new Notice('Thinking disabled');
+            }
+        });
+
+        // Visibility logic
+        const updateThinkingVisibility = (model: string) => {
+            if (model.includes('gemini-3')) {
+                this.thinkingToggleBtn.style.display = 'none';
+            } else {
+                this.thinkingToggleBtn.style.display = 'flex';
+            }
+        };
+        updateThinkingVisibility(this.currentModel);
+
+        const dropdown = new DropdownComponent(controlsContainer);
+        dropdown.selectEl.addClass('gemini-model-selector');
         GEMINI_MODELS.forEach(model => dropdown.addOption(model.id, model.name));
         
         dropdown.setValue(this.currentModel)
             .onChange(async (value) => {
                 this.currentModel = value;
+                updateThinkingVisibility(value);
                 new Notice(`Model switched to ${value}`);
             });
     }
@@ -432,6 +468,7 @@ class GeminiChatView extends ItemView {
     async startNewChat() {
         const container = this.containerEl.children[1];
         this.currentModel = this.plugin.settings.modelName;
+        this.isThinkingEnabled = this.plugin.settings.enableThinking; // Reset to default
 
         const titleEl = this.initializeChatUI(container);
         if (titleEl) titleEl.setText('New Chat');
@@ -447,6 +484,7 @@ class GeminiChatView extends ItemView {
     async loadChat(file: TFile) {
         const container = this.containerEl.children[1];
         this.currentModel = this.plugin.settings.modelName;
+        this.isThinkingEnabled = this.plugin.settings.enableThinking; // Reset to default
 
         const titleEl = this.initializeChatUI(container);
         if (titleEl) titleEl.setText(file.basename);
@@ -673,7 +711,8 @@ class GeminiChatView extends ItemView {
                 this.currentModel, 
                 this.plugin.settings,
                 this.abortController.signal,
-                cachedContentName // Pass the cache name if available
+                cachedContentName,
+                this.isThinkingEnabled // Pass the UI state override
             );
 
 			loadingEl.remove();
@@ -870,6 +909,16 @@ class GeminiSettingTab extends PluginSettingTab {
 					this.plugin.settings.thinkingLevel = value as 'low' | 'high';
 					await this.plugin.saveSettings();
 				}));
+
+        new Setting(containerEl)
+            .setName('Enable Thinking (Gemini 2.5)')
+            .setDesc('Default setting for dynamic thinking process (Gemini 2.5 models). Can be toggled in the chat view.')
+            .addToggle(toggle => toggle
+                .setValue(this.plugin.settings.enableThinking)
+                .onChange(async (value) => {
+                    this.plugin.settings.enableThinking = value;
+                    await this.plugin.saveSettings();
+                }));
 
 		new Setting(containerEl)
 			.setName('Chat History Folder')

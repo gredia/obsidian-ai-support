@@ -8,7 +8,8 @@ export class GeminiApiClient {
         modelName: string, 
         settings: GeminiPluginSettings,
         signal?: AbortSignal,
-        cachedContentName?: string
+        cachedContentName?: string,
+        enableThinkingOverride?: boolean // New parameter
     ): Promise<GeminiChatMessage> {
         const { apiKey, thinkingLevel, enableGoogleSearch, enableUrlContext } = settings;
         
@@ -51,11 +52,17 @@ export class GeminiApiClient {
                 thinkingLevel: thinkingLevel
             };
         } else {
-            // Gemini 2.5: Always enable dynamic thinking (-1) for models that support it
-            body.generationConfig.thinkingConfig = {
-                includeThoughts: true,
-                thinkingBudget: -1 
-            };
+            // Gemini 2.5: Check override first, then settings
+            const shouldUseThinking = enableThinkingOverride !== undefined ? enableThinkingOverride : settings.enableThinking;
+
+            if (shouldUseThinking) {
+                // Enable dynamic thinking (-1)
+                body.generationConfig.thinkingConfig = {
+                    includeThoughts: true,
+                    thinkingBudget: -1 
+                };
+            }
+            // If false, do NOT include thinkingConfig
         }
 
         // Tools cannot be used in generateContent when cachedContent is present
