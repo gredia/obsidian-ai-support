@@ -6,7 +6,6 @@ export interface ChatMessage {
     parts?: any[]; // For storing API parts including thoughtSignature
     thought?: string; // For storing thinking process text
     thoughtSignature?: string; // Explicitly store signature if extracted
-    timestamp?: number;
 }
 
 export class ChatHistoryService {
@@ -44,10 +43,7 @@ export class ChatHistoryService {
         }
     }
 
-    /**
-     * Appends new messages to an existing chat file or creates a new one if it doesn't exist.
-     */
-    async appendChat(folderPath: string, newMessages: ChatMessage[], fileName?: string, firstUserMessageContent?: string): Promise<string> {
+    async saveChat(folderPath: string, messages: ChatMessage[], fileName?: string, firstUserMessageContent?: string): Promise<string> {
         const normalizedFolder = normalizePath(folderPath);
         
         // Ensure folder exists
@@ -55,7 +51,7 @@ export class ChatHistoryService {
             await this.app.vault.createFolder(normalizedFolder);
         }
 
-        const formattedContent = this.formatChatContent(newMessages);
+        const chatContent = this.formatChatContent(messages);
         
         let targetFile: TFile | null = null;
         let targetPath = "";
@@ -63,10 +59,7 @@ export class ChatHistoryService {
         if (fileName) {
             targetPath = normalizePath(`${normalizedFolder}/${fileName}`);
             targetFile = this.app.vault.getAbstractFileByPath(targetPath) as TFile;
-        }
-
-        // If file doesn't exist yet (new chat), create it
-        if (!targetFile) {
+        } else {
             // Generate new filename based on first user message content or timestamp
             let baseName = "";
             if (firstUserMessageContent) {
@@ -88,26 +81,21 @@ export class ChatHistoryService {
                 baseName = `Chat ${dateStr}`;
             }
             targetPath = normalizePath(`${normalizedFolder}/${baseName}.md`);
-            
-            const fileContent = this.generateNoteContent(formattedContent);
-            try {
+        }
+
+        const fileContent = this.generateNoteContent(chatContent);
+
+        try {
+            if (targetFile) {
+                await this.app.vault.modify(targetFile, fileContent);
+            } else {
                 targetFile = await this.app.vault.create(targetPath, fileContent);
-                return targetFile.name;
-            } catch (error) {
-                console.error(`Failed to create chat file ${targetPath}:`, error);
-                new Notice(`Failed to create chat: ${error.message}`);
-                throw error;
             }
-        } else {
-            // Append to existing file
-            try {
-                await this.app.vault.append(targetFile, "\n\n" + formattedContent);
-                return targetFile.name;
-            } catch (error) {
-                console.error(`Failed to append to chat file ${targetPath}:`, error);
-                new Notice(`Failed to save chat: ${error.message}`);
-                throw error;
-            }
+            return targetFile.name;
+        } catch (error) {
+            console.error(`Failed to save chat to ${targetPath}:`, error);
+            new Notice(`Failed to save chat: ${error.message}`);
+            throw error;
         }
     }
 
@@ -131,13 +119,7 @@ ${chatContent}`;
     private formatChatContent(messages: ChatMessage[]): string {
         return messages.map(msg => {
             const role = msg.role === 'user' ? 'user' : 'ai'; // Map model to ai for compatibility
-            
-            let timestampStr = "";
-            if (msg.timestamp) {
-                timestampStr = new Date(msg.timestamp).toLocaleString();
-            } else {
-                timestampStr = new Date().toLocaleString();
-            }
+            const timestamp = new Date().toLocaleString(); 
             
             // Serialize metadata (parts, thought, signature)
             // Filter parts to avoid saving duplicate text content if possible, or just save critical parts
@@ -147,7 +129,7 @@ ${chatContent}`;
             if (msg.thought) metadata.thought = msg.thought;
             if (msg.thoughtSignature) metadata.thoughtSignature = msg.thoughtSignature;
 
-            let textContent = `**${role}**: ${msg.content}\n[Timestamp: ${timestampStr}]`;
+            let textContent = `**${role}**: ${msg.content}\n[Timestamp: ${timestamp}]`;
             
             // Append metadata as hidden HTML comment if not empty
             if (Object.keys(metadata).length > 0) {
@@ -186,7 +168,6 @@ ${chatContent}`;
             let parts: any[] | undefined;
             let thought: string | undefined;
             let thoughtSignature: string | undefined;
-            let timestamp: number | undefined;
 
             // Extract Metadata Comment
             const metadataRegex = /\n<!-- gemini-metadata: (.*?) -->$/;
@@ -209,26 +190,16 @@ ${chatContent}`;
                 }
             }
 
-            // Remove and parse Timestamp line
-            const timestampRegex = /\n\[Timestamp: (.*?)\]$/;
-            const timestampMatch = text.match(timestampRegex);
-            
-            if (timestampMatch) {
-                const dateStr = timestampMatch[1];
-                const parsedDate = new Date(dateStr);
-                if (!isNaN(parsedDate.getTime())) {
-                    timestamp = parsedDate.getTime();
-                }
-                text = text.replace(timestampRegex, '').trim();
-            }
+            // Remove Timestamp line if present at the end (after metadata removal)
+            const timestampRegex = /\n\[Timestamp: .*?\]$/;
+            text = text.replace(timestampRegex, '').trim();
 
             messages.push({ 
                 role: role as 'user' | 'model', 
                 content: text,
                 parts: parts,
                 thought: thought,
-                thoughtSignature: thoughtSignature,
-                timestamp: timestamp
+                thoughtSignature: thoughtSignature
             });
         }
 

@@ -556,15 +556,14 @@ class GeminiChatView extends ItemView {
 			role: 'user',
 			content: displayContent,
 			parts: [],
-            images: imagePaths,
-            timestamp: Date.now()
+            images: imagePaths
 		};
 		this.addMessage(userMsg);
         this.history.push(userMsg);
         
-        this.chatHistoryService.appendChat(
+        this.chatHistoryService.saveChat(
             this.plugin.settings.chatHistoryFolder,
-            [userMsg],
+            this.history.map(m => ({ role: m.role, content: m.content })),
             this.currentChatFile || undefined,
             (this.currentChatFile === null && this.history.length === 1) ? text : undefined
         ).then(file => {
@@ -727,20 +726,18 @@ class GeminiChatView extends ItemView {
 
 			loadingEl.remove();
 
-			responseMsg.timestamp = Date.now();
 			this.addMessage(responseMsg);
             this.history.push(responseMsg);
 
-            const savedFile = await this.chatHistoryService.appendChat(
+            const savedFile = await this.chatHistoryService.saveChat(
                 this.plugin.settings.chatHistoryFolder,
-                [{
-                    role: responseMsg.role, 
-                    content: responseMsg.content,
-                    parts: responseMsg.parts,
-                    thought: responseMsg.thought,
-                    thoughtSignature: responseMsg.thoughtSignature,
-                    timestamp: responseMsg.timestamp
-                }],
+                this.history.map(m => ({
+                    role: m.role, 
+                    content: m.content,
+                    parts: m.parts,
+                    thought: m.thought,
+                    thoughtSignature: m.thoughtSignature
+                })),
                 this.currentChatFile || undefined
             );
             this.currentChatFile = savedFile;
