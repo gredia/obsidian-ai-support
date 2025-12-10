@@ -18,4 +18,5 @@ export interface GeminiChatMessage {
     usageMetadata?: { promptTokenCount: number; candidatesTokenCount: number; totalTokenCount: number };
     groundingMetadata?: any;
     images?: string[]; // Resource paths for display
+    timestamp?: number;
 }
