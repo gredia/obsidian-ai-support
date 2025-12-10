@@ -280,7 +280,7 @@ class GeminiChatView extends ItemView {
         this.thinkingToggleBtn = controlsContainer.createDiv({ cls: 'gemini-toolbar-btn gemini-thinking-toggle', attr: { title: 'Toggle Thinking (Gemini 2.5)' } });
         // Initial Icon state
         setIcon(this.thinkingToggleBtn, this.isThinkingEnabled ? 'brain-circuit' : 'brain'); 
-        if (this.isThinkingEnabled) this.thinkingToggleBtn.addClass('is-active');
+        this.thinkingToggleBtn.toggleClass('is-active', this.isThinkingEnabled);
         
         this.thinkingToggleBtn.onClickEvent(() => {
             this.isThinkingEnabled = !this.isThinkingEnabled;
@@ -468,7 +468,7 @@ class GeminiChatView extends ItemView {
     async startNewChat() {
         const container = this.containerEl.children[1];
         this.currentModel = this.plugin.settings.modelName;
-        this.isThinkingEnabled = this.plugin.settings.enableThinking; // Reset to default
+        this.isThinkingEnabled = !!this.plugin.settings.enableThinking; // Reset to default
 
         const titleEl = this.initializeChatUI(container);
         if (titleEl) titleEl.setText('New Chat');
@@ -484,7 +484,7 @@ class GeminiChatView extends ItemView {
     async loadChat(file: TFile) {
         const container = this.containerEl.children[1];
         this.currentModel = this.plugin.settings.modelName;
-        this.isThinkingEnabled = this.plugin.settings.enableThinking; // Reset to default
+        this.isThinkingEnabled = !!this.plugin.settings.enableThinking; // Reset to default
 
         const titleEl = this.initializeChatUI(container);
         if (titleEl) titleEl.setText(file.basename);
