@@ -23,6 +23,16 @@ export class GeminiFileManager {
         this.app = app;
     }
 
+    private getHeader(headers: Record<string, string>, key: string): string | undefined {
+        const lowerKey = key.toLowerCase();
+        for (const k in headers) {
+            if (k.toLowerCase() === lowerKey) {
+                return headers[k];
+            }
+        }
+        return undefined;
+    }
+
     async uploadFile(file: TFile, apiKey: string): Promise<string> {
         // --- Cache Check ---
         const now = Date.now();
@@ -80,7 +90,7 @@ export class GeminiFileManager {
                 throw new Error(`Initial upload failed: ${initialResponse.status} ${initialResponse.text}`);
             }
 
-            let uploadUrl = initialResponse.headers['x-goog-upload-url'];
+            let uploadUrl = this.getHeader(initialResponse.headers, 'x-goog-upload-url');
             if (!uploadUrl) {
                 throw new Error('Failed to get upload URL from response headers');
             }
