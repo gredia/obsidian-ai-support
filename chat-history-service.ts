@@ -99,6 +99,31 @@ export class ChatHistoryService {
         }
     }
 
+    async appendMessage(folderPath: string, fileName: string | null, message: ChatMessage, firstUserMessageContent?: string): Promise<string> {
+        const normalizedFolder = normalizePath(folderPath);
+        
+        // Ensure folder exists
+        if (!this.app.vault.getAbstractFileByPath(normalizedFolder)) {
+            await this.app.vault.createFolder(normalizedFolder);
+        }
+
+        let targetFile: TFile | null = null;
+        if (fileName) {
+            const targetPath = normalizePath(`${normalizedFolder}/${fileName}`);
+            targetFile = this.app.vault.getAbstractFileByPath(targetPath) as TFile;
+        }
+
+        if (targetFile) {
+            // Append
+            const contentToAppend = "\n\n" + this.formatMessage(message);
+            await this.app.vault.append(targetFile, contentToAppend);
+            return targetFile.name;
+        } else {
+            // Create New
+            return this.saveChat(folderPath, [message], undefined, firstUserMessageContent);
+        }
+    }
+
     private sanitizeFilename(name: string): string {
         // Remove invalid characters for filenames and replace spaces with dashes
         return name.replace(/[\\/:*?"<>|]/g, '').replace(/\s/g, ' ').trim();
@@ -116,34 +141,32 @@ tags:
 ${chatContent}`;
     }
 
-    private formatChatContent(messages: ChatMessage[]): string {
-        return messages.map(msg => {
-            const role = msg.role === 'user' ? 'user' : 'ai'; // Map model to ai for compatibility
-            const timestamp = new Date().toLocaleString(); 
-            
-            // Serialize metadata (parts, thought, signature)
-            // Filter parts to avoid saving duplicate text content if possible, or just save critical parts
-            // Saving full parts array is safest for reconstructing API calls
-            const metadata: any = {};
-            if (msg.parts) metadata.parts = msg.parts;
-            if (msg.thought) metadata.thought = msg.thought;
-            if (msg.thoughtSignature) metadata.thoughtSignature = msg.thoughtSignature;
+    private formatMessage(msg: ChatMessage): string {
+        const role = msg.role === 'user' ? 'user' : 'ai'; // Map model to ai for compatibility
+        const timestamp = new Date().toLocaleString(); 
+        
+        // Serialize metadata (parts, thought, signature)
+        const metadata: any = {};
+        if (msg.parts) metadata.parts = msg.parts;
+        if (msg.thought) metadata.thought = msg.thought;
+        if (msg.thoughtSignature) metadata.thoughtSignature = msg.thoughtSignature;
 
-            let textContent = `**${role}**: ${msg.content}\n[Timestamp: ${timestamp}]`;
-            
-            // Append metadata as hidden HTML comment if not empty
-            if (Object.keys(metadata).length > 0) {
-                 // Base64 encode to avoid conflict with markdown syntax or comment terminators
-                 const json = JSON.stringify(metadata);
-                 // Simple masking to prevent accidental comment closure "-->" inside json
-                 // Base64 is cleaner but plain text is more readable for debug. 
-                 // Let's use Base64 for robustness.
-                 const b64 = btoa(unescape(encodeURIComponent(json)));
-                 textContent += `\n<!-- gemini-metadata: ${b64} -->`;
-            }
-            
-            return textContent;
-        }).join('\n\n');
+        let textContent = `**${role}**: ${msg.content}\n[Timestamp: ${timestamp}]`;
+        
+        // Append metadata as hidden HTML comment if not empty
+        if (Object.keys(metadata).length > 0) {
+                // Base64 encode to avoid conflict with markdown syntax or comment terminators
+                const json = JSON.stringify(metadata);
+                // Simple masking to prevent accidental comment closure "-->" inside json
+                const b64 = btoa(unescape(encodeURIComponent(json)));
+                textContent += `\n<!-- gemini-metadata: ${b64} -->`;
+        }
+        
+        return textContent;
+    }
+
+    private formatChatContent(messages: ChatMessage[]): string {
+        return messages.map(msg => this.formatMessage(msg)).join('\n\n');
     }
 
     private parseChatContent(content: string): ChatMessage[] {

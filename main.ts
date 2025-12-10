@@ -561,10 +561,10 @@ class GeminiChatView extends ItemView {
 		this.addMessage(userMsg);
         this.history.push(userMsg);
         
-        this.chatHistoryService.saveChat(
+        this.chatHistoryService.appendMessage(
             this.plugin.settings.chatHistoryFolder,
-            this.history.map(m => ({ role: m.role, content: m.content })),
-            this.currentChatFile || undefined,
+            this.currentChatFile, // null if new
+            userMsg,
             (this.currentChatFile === null && this.history.length === 1) ? text : undefined
         ).then(file => {
             this.currentChatFile = file;
@@ -729,16 +729,11 @@ class GeminiChatView extends ItemView {
 			this.addMessage(responseMsg);
             this.history.push(responseMsg);
 
-            const savedFile = await this.chatHistoryService.saveChat(
+            const savedFile = await this.chatHistoryService.appendMessage(
                 this.plugin.settings.chatHistoryFolder,
-                this.history.map(m => ({
-                    role: m.role, 
-                    content: m.content,
-                    parts: m.parts,
-                    thought: m.thought,
-                    thoughtSignature: m.thoughtSignature
-                })),
-                this.currentChatFile || undefined
+                this.currentChatFile,
+                responseMsg,
+                undefined
             );
             this.currentChatFile = savedFile;
 
@@ -797,6 +792,8 @@ class GeminiChatView extends ItemView {
         copyBtn.onClickEvent((e) => {
             e.stopPropagation();
             let textToCopy = msg.content;
+            textToCopy = textToCopy.replace(/\n*\*\*Attachments:\*\*.*$/gm, ''); // Remove at end
+            textToCopy = textToCopy.replace(/^\*\*Attachments:\*\*.*\n*/gm, ''); // Remove at start/middle
             textToCopy = textToCopy.replace(/\n*\*\*Active Note:\*\*.*$/gm, '');
             textToCopy = textToCopy.replace(/^\*\*Active Note:\*\*.*\n*/gm, '');
             navigator.clipboard.writeText(textToCopy.trim()).then(() => new Notice('Message copied'));
