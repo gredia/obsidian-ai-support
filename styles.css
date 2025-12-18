@@ -92,6 +92,9 @@
     line-height: 1.5;
     word-wrap: break-word;
     position: relative;
+    user-select: text; /* Allow text selection */
+    -webkit-user-select: text;
+    cursor: text;
 }
 
 .gemini-chat-message-actions {
@@ -420,6 +423,9 @@
     padding: 8px;
     border-radius: 4px;
     white-space: pre-wrap;
+    user-select: text;
+    -webkit-user-select: text;
+    cursor: text;
 }
 
 /* Dark mode adjustments for thinking content if needed */
