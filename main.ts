@@ -894,6 +894,7 @@ class GeminiSettingTab extends PluginSettingTab {
 			.setDesc('The default Gemini model for new chats.')
 			.addDropdown(dropdown => dropdown
                 .addOption('gemini-3-pro-preview', 'Gemini 3 Pro Preview')
+                .addOption('gemini-3-flash-preview', 'Gemini 3 Flash Preview')
                 .addOption('gemini-2.5-pro', 'Gemini 2.5 Pro')
                 .addOption('gemini-2.5-flash', 'Gemini 2.5 Flash')
                 .addOption('gemini-2.5-flash-lite', 'Gemini 2.5 Flash Lite')
