@@ -180,7 +180,7 @@ class GeminiChatView extends ItemView {
     }
 
     async renderWelcomeScreen() {
-        const container = this.containerEl.children[1];
+        const container = this.contentEl;
         container.empty();
         container.addClass('gemini-chat-view');
 
@@ -211,7 +211,8 @@ class GeminiChatView extends ItemView {
         }
     }
 
-    initializeChatUI(container: Element) {
+    initializeChatUI() {
+        const container = this.contentEl;
         container.empty();
         container.addClass('gemini-chat-view');
 
@@ -466,11 +467,10 @@ class GeminiChatView extends ItemView {
     }
 
     async startNewChat() {
-        const container = this.containerEl.children[1];
         this.currentModel = this.plugin.settings.modelName;
         this.isThinkingEnabled = !!this.plugin.settings.enableThinking; // Reset to default
 
-        const titleEl = this.initializeChatUI(container);
+        const titleEl = this.initializeChatUI();
         if (titleEl) titleEl.setText('New Chat');
 
         this.currentChatFile = null;
@@ -482,11 +482,10 @@ class GeminiChatView extends ItemView {
     }
 
     async loadChat(file: TFile) {
-        const container = this.containerEl.children[1];
         this.currentModel = this.plugin.settings.modelName;
         this.isThinkingEnabled = !!this.plugin.settings.enableThinking; // Reset to default
 
-        const titleEl = this.initializeChatUI(container);
+        const titleEl = this.initializeChatUI();
         if (titleEl) titleEl.setText(file.basename);
 
         this.contextFiles = [];
