@@ -629,6 +629,11 @@ class GeminiChatView extends ItemView {
                 const file = mediaFiles[i];
                 try {
                     const fileUri = await this.fileManager.uploadFile(file, this.plugin.settings.apiKey);
+                    
+                    if (validFileUris) {
+                        validFileUris.add(fileUri);
+                    }
+
                     const mimeType = this.fileManager.getMimeType(file.extension) || 'application/octet-stream';
                     
                     let useExplicitCache = false;
