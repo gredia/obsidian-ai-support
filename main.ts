@@ -832,6 +832,17 @@ class GeminiChatView extends ItemView {
 			this
 		);
 
+        // Intercept internal link clicks to open in Obsidian
+        msgEl.querySelectorAll('a.internal-link').forEach(link => {
+            link.addEventListener('click', (e) => {
+                e.preventDefault();
+                const target = link.getAttribute('data-href') || link.getAttribute('href');
+                if (target) {
+                    this.app.workspace.openLinkText(target, '', false);
+                }
+            });
+        });
+
         if (msg.groundingMetadata) {
             const groundingEl = msgEl.createDiv({ cls: 'gemini-chat-grounding', attr: { style: 'margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--background-modifier-border); font-size: 0.85em;' } });
             
