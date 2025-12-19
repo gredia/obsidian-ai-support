@@ -4,6 +4,7 @@ interface CachedFile {
     uri: string;
     mtime: number;
     uploadTime: number;
+    apiKey: string; // Store key to invalidate cache on change
 }
 
 interface ExplicitCacheEntry {
@@ -11,6 +12,7 @@ interface ExplicitCacheEntry {
     expireTime: string;
     modelName: string;
     fileUri: string;
+    apiKey: string;
 }
 
 export class GeminiFileManager {
@@ -34,13 +36,15 @@ export class GeminiFileManager {
     }
 
     async uploadFile(file: TFile, apiKey: string): Promise<string> {
+        const cleanApiKey = apiKey.trim();
+        
         // --- Cache Check ---
         const now = Date.now();
         const cached = this.fileCache.get(file.path);
 
         if (cached) {
-            // Check if file has been modified since upload
-            if (cached.mtime === file.stat.mtime) {
+            // Check if file has been modified since upload AND API key matches
+            if (cached.mtime === file.stat.mtime && cached.apiKey === cleanApiKey) {
                 // Check if file URI is still valid (Gemini files last 48h)
                 // We use 47h to be safe
                 const ageHours = (now - cached.uploadTime) / (1000 * 60 * 60);
@@ -65,7 +69,6 @@ export class GeminiFileManager {
         }
 
         const displayName = file.basename;
-        const cleanApiKey = apiKey.trim();
 
         // 1. Initial Resumable Request
         // Use v1beta for upload as per standard Gemini Files API
@@ -125,7 +128,8 @@ export class GeminiFileManager {
             this.fileCache.set(file.path, {
                 uri: fileUri,
                 mtime: file.stat.mtime,
-                uploadTime: Date.now()
+                uploadTime: Date.now(),
+                apiKey: cleanApiKey
             });
             // --------------------
 
@@ -152,11 +156,12 @@ export class GeminiFileManager {
         // Cache key should now include tool usage as it changes the cache definition
         const toolKey = `${settings.enableGoogleSearch ? 'G' : ''}${settings.enableUrlContext ? 'U' : ''}`;
         const cacheKey = `${file.path}::${modelName}::${toolKey}`;
+        const cleanApiKey = apiKey.trim();
         
         const cached = this.explicitCache.get(cacheKey);
         
-        // 1. Check if we have a valid cache in memory
-        if (cached && cached.fileUri === fileUri) { // Ensure URI matches (re-upload invalidates old cache logic)
+        // 1. Check if we have a valid cache in memory AND API key matches
+        if (cached && cached.fileUri === fileUri && cached.apiKey === cleanApiKey) { 
             const expireDate = new Date(cached.expireTime);
             // Add a buffer (e.g., 5 mins) to avoid using expiring cache
             if (expireDate.getTime() > Date.now() + 5 * 60 * 1000) {
@@ -209,7 +214,7 @@ export class GeminiFileManager {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-goog-api-key': apiKey
+                    'x-goog-api-key': cleanApiKey
                 },
                 body: JSON.stringify(body),
                 throw: false // Handle errors manually
@@ -236,7 +241,8 @@ export class GeminiFileManager {
                 name: cacheName,
                 expireTime: expireTime,
                 modelName: modelName,
-                fileUri: fileUri
+                fileUri: fileUri,
+                apiKey: cleanApiKey
             });
 
             return cacheName;
