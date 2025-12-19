@@ -588,6 +588,12 @@ class GeminiChatView extends ItemView {
         this.setLoading(true);
 
         try {
+            // Validate file cache before processing
+            let validFileUris: Set<string> | undefined;
+            if (this.contextFiles.length > 0 || this.history.length > 0) { // Check even if no new files, history might have files
+                 validFileUris = await this.fileManager.validateCache(this.plugin.settings.apiKey);
+            }
+
             const messageParts: any[] = [];
             let contextText = "";
             let cachedContentName: string | undefined = undefined;
@@ -720,7 +726,8 @@ class GeminiChatView extends ItemView {
                 this.plugin.settings,
                 this.abortController.signal,
                 cachedContentName,
-                this.isThinkingEnabled // Pass the UI state override
+                this.isThinkingEnabled, // Pass the UI state override
+                validFileUris // Pass the set of active file URIs for filtering
             );
 
 			loadingEl.remove();

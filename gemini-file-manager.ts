@@ -343,4 +343,45 @@ export class GeminiFileManager {
         const mime = this.getMimeType(file.extension);
         return mime ? mime.startsWith('image/') : false;
     }
+
+    async validateCache(apiKey: string): Promise<Set<string>> {
+        const remoteUris = new Set<string>();
+        try {
+            const cleanApiKey = apiKey.trim();
+            // Request max page size to minimize pagination handling for now (max is 100)
+            const url = `https://generativelanguage.googleapis.com/v1beta/files?pageSize=100`;
+            
+            const response = await requestUrl({
+                url: url,
+                method: 'GET',
+                headers: { 'x-goog-api-key': cleanApiKey }
+            });
+
+            if (response.status >= 400) {
+                console.warn(`Gemini: Failed to list files for cache validation: ${response.status}`);
+                return remoteUris;
+            }
+
+            const data = response.json;
+            const remoteFiles = data.files || [];
+            
+            for (const f of remoteFiles) {
+                if (f.uri) remoteUris.add(f.uri);
+            }
+
+            // Check fileCache
+            for (const [path, cached] of this.fileCache.entries()) {
+                if (!remoteUris.has(cached.uri)) {
+                    console.log(`Gemini: Cache invalid for ${path} (remote file missing), removing.`);
+                    this.fileCache.delete(path);
+                }
+            }
+            
+            return remoteUris;
+
+        } catch (error) {
+            console.error("Gemini: Cache validation error:", error);
+            return remoteUris;
+        }
+    }
 }

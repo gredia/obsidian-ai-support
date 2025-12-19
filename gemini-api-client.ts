@@ -9,7 +9,8 @@ export class GeminiApiClient {
         settings: GeminiPluginSettings,
         signal?: AbortSignal,
         cachedContentName?: string,
-        enableThinkingOverride?: boolean // New parameter
+        enableThinkingOverride?: boolean, // New parameter
+        validFileUris?: Set<string> // New parameter for filtering expired files
     ): Promise<GeminiChatMessage> {
         const { apiKey, thinkingLevel, enableGoogleSearch, enableUrlContext } = settings;
         
@@ -20,7 +21,24 @@ export class GeminiApiClient {
         // Format history for API
         const contents = history.map(msg => {
             // Reconstruct parts, ensuring thoughtSignature is included if present
-            const parts = msg.parts ? [...msg.parts] : [{ text: msg.content }];
+            // Filter parts based on validFileUris if provided
+            let parts = msg.parts ? [...msg.parts] : [{ text: msg.content }];
+            
+            if (validFileUris) {
+                parts = parts.filter(p => {
+                    // Keep non-file parts (text, etc.)
+                    if (!p.file_data) return true;
+                    // Keep file parts ONLY if their URI is in the valid set
+                    return validFileUris.has(p.file_data.file_uri);
+                });
+                
+                // If a message becomes empty after filtering (e.g. it was only an expired image),
+                // add a placeholder to preserve turn structure (Gemini usually requires non-empty content)
+                if (parts.length === 0) {
+                    parts.push({ text: "[Attached file expired]" });
+                }
+            }
+
             return {
                 role: msg.role,
                 parts: parts
