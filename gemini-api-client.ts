@@ -12,7 +12,7 @@ export class GeminiApiClient {
         enableThinkingOverride?: boolean, // New parameter
         validFileUris?: Set<string> // New parameter for filtering expired files
     ): Promise<GeminiChatMessage> {
-        const { apiKey, thinkingLevel, enableGoogleSearch, enableUrlContext } = settings;
+        const { apiKey, thinkingLevel, enableGoogleSearch, enableUrlContext, mediaResolution } = settings;
         
         const isGemini3 = modelName.includes('gemini-3');
         const apiVersion = isGemini3 ? 'v1alpha' : 'v1beta';
@@ -57,6 +57,17 @@ export class GeminiApiClient {
             contents: contents,
             generationConfig: {}
         };
+
+        if (mediaResolution && mediaResolution !== 'auto') {
+            const resolutionMap: Record<string, string> = {
+                'low': 'MEDIA_RESOLUTION_LOW',
+                'medium': 'MEDIA_RESOLUTION_MEDIUM',
+                'high': 'MEDIA_RESOLUTION_HIGH'
+            };
+            if (resolutionMap[mediaResolution]) {
+                body.generationConfig.mediaResolution = resolutionMap[mediaResolution];
+            }
+        }
 
         if (cachedContentName) {
             body.cachedContent = cachedContentName;
