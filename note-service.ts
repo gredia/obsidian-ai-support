@@ -16,6 +16,27 @@ type ResolveNoteFailure = {
 
 type ResolveNoteOutcome = ResolveNoteSuccess | ResolveNoteAmbiguous | ResolveNoteFailure;
 
+export function extractWikiLinkTargets(text: string): string[] {
+    const targets: string[] = [];
+    const seen = new Set<string>();
+    const linkPattern = /!?\[\[([^\]]+)\]\]/g;
+
+    let match: RegExpExecArray | null;
+    while ((match = linkPattern.exec(text)) !== null) {
+        if (match[0].startsWith("!")) {
+            continue;
+        }
+
+        const target = match[1].split("|")[0].trim();
+        if (target && !seen.has(target)) {
+            seen.add(target);
+            targets.push(target);
+        }
+    }
+
+    return targets;
+}
+
 export class NoteService {
     app: App;
 

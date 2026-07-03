@@ -62,11 +62,11 @@ class TestGeminiChatView {
             this.thinkingToggleBtn.addClass('is-active');
         // ... visibility logic
         const updateThinkingVisibility = (model) => {
-            if (model.includes('gemini-3')) {
-                this.thinkingToggleBtn.style.display = 'none';
+            if (model.includes('gemini-2.5')) {
+                this.thinkingToggleBtn.style.display = 'flex';
             }
             else {
-                this.thinkingToggleBtn.style.display = 'flex';
+                this.thinkingToggleBtn.style.display = 'none';
             }
         };
         updateThinkingVisibility(this.currentModel);
@@ -97,6 +97,12 @@ function runTests() {
         }
         else {
             console.log('PASS: Icon is "brain-circuit"');
+        }
+        if (view.thinkingToggleBtn.style.display !== 'flex') {
+            console.error(`FAIL: Gemini 2.5 thinking toggle should be visible, got "${view.thinkingToggleBtn.style.display}"`);
+        }
+        else {
+            console.log('PASS: Gemini 2.5 thinking toggle is visible');
         }
         console.log('\n--- Test 2: Start New Chat with enableThinking = FALSE ---');
         plugin.settings.enableThinking = false;

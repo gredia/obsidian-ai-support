@@ -2,30 +2,68 @@ import { requestUrl } from "obsidian";
 import { GeminiChatMessage, GeminiPluginSettings } from "./types";
 
 export class GeminiApiClient {
-    
+    private toThinkingLevel(value: GeminiPluginSettings["thinkingLevel"], modelName: string): string {
+        const supportedLevels = this.getSupportedThinkingLevels(modelName);
+        const normalizedValue = supportedLevels.includes(value) ? value : supportedLevels[supportedLevels.length - 1];
+
+        const map: Record<GeminiPluginSettings["thinkingLevel"], string> = {
+            minimal: "MINIMAL",
+            low: "LOW",
+            medium: "MEDIUM",
+            high: "HIGH"
+        };
+        return map[normalizedValue] ?? "HIGH";
+    }
+
+    private getSupportedThinkingLevels(modelName: string): GeminiPluginSettings["thinkingLevel"][] {
+        if (modelName === "gemini-3.1-pro-preview" || modelName.includes("gemini-2.5")) {
+            return ["low", "medium", "high"];
+        }
+        return ["minimal", "low", "medium", "high"];
+    }
+
+    private toMediaResolution(value: GeminiPluginSettings["mediaResolution"]): string | null {
+        if (value === "auto") {
+            return null;
+        }
+
+        const map: Record<Exclude<GeminiPluginSettings["mediaResolution"], "auto">, string> = {
+            low: "MEDIA_RESOLUTION_LOW",
+            medium: "MEDIA_RESOLUTION_MEDIUM",
+            high: "MEDIA_RESOLUTION_HIGH"
+        };
+        return map[value];
+    }
+
     async generateContent(
         history: GeminiChatMessage[], 
         modelName: string, 
         settings: GeminiPluginSettings,
         signal?: AbortSignal,
         cachedContentName?: string,
-        enableThinkingOverride?: boolean // New parameter
+        enableThinkingOverride?: boolean,
+        validFileUris?: Set<string>
     ): Promise<GeminiChatMessage> {
-        const { apiKey, thinkingLevel, enableGoogleSearch, enableUrlContext } = settings;
+        const { apiKey, thinkingLevel, enableGoogleSearch, enableUrlContext, mediaResolution } = settings;
         
         const isGemini3 = modelName.includes('gemini-3');
-        const apiVersion = isGemini3 ? 'v1alpha' : 'v1beta';
-        const url = `https://generativelanguage.googleapis.com/${apiVersion}/models/${modelName}:generateContent`;
+        const url = `https://generativelanguage.googleapis.com/v1beta/models/${modelName}:generateContent`;
 
         // Format history for API
         const contents = history.map(msg => {
             // Reconstruct parts, ensuring thoughtSignature is included if present
-            const parts = msg.parts ? [...msg.parts] : [{ text: msg.content }];
+            let parts = msg.parts && msg.parts.length > 0 ? [...msg.parts] : [{ text: msg.content }];
+            if (validFileUris) {
+                parts = parts.filter((part: any) => !part.file_data || validFileUris.has(part.file_data.file_uri));
+                if (parts.length === 0) {
+                    parts = [{ text: "[Attached file expired]" }];
+                }
+            }
             return {
                 role: msg.role,
                 parts: parts
             };
-        });
+        }).filter(content => content.parts.length > 0);
 
         const tools: any[] = [];
         if (enableGoogleSearch) {
@@ -44,12 +82,17 @@ export class GeminiApiClient {
             body.cachedContent = cachedContentName;
         }
 
+        const mediaResolutionValue = this.toMediaResolution(mediaResolution);
+        if (mediaResolutionValue) {
+            body.generationConfig.mediaResolution = mediaResolutionValue;
+        }
+
         // Thinking Config
         if (isGemini3) {
             // Gemini 3: thinking_config with include_thoughts and thinking_level
             body.generationConfig.thinkingConfig = {
                 includeThoughts: true,
-                thinkingLevel: thinkingLevel
+                thinkingLevel: this.toThinkingLevel(thinkingLevel, modelName)
             };
         } else {
             // Gemini 2.5: Check override first, then settings
@@ -59,7 +102,7 @@ export class GeminiApiClient {
                 // Enable dynamic thinking (-1)
                 body.generationConfig.thinkingConfig = {
                     includeThoughts: true,
-                    thinkingBudget: -1 
+                    thinkingBudget: -1
                 };
             }
             // If false, do NOT include thinkingConfig
@@ -75,7 +118,7 @@ export class GeminiApiClient {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'x-goog-api-key': apiKey
+                'x-goog-api-key': apiKey.trim()
             },
             body: JSON.stringify(body),
             signal: signal
@@ -96,19 +139,21 @@ export class GeminiApiClient {
             const usageMetadata = data.usageMetadata;
             const groundingMetadata = candidate.groundingMetadata;
             
-            const contentParts = content.parts.filter((p: any) => !p.thought);
-            const thoughtParts = content.parts.filter((p: any) => p.thought === true);
+            const responseParts = Array.isArray(content.parts) ? content.parts : [];
+            const contentParts = responseParts.filter((p: any) => !p.thought);
+            const thoughtParts = responseParts.filter((p: any) => p.thought === true);
             
             // Extract Thought Text
             let thoughtText = "";
             if (thoughtParts.length > 0) {
-                thoughtText = thoughtParts.map((p: any) => p.text).join('\n\n');
+                thoughtText = thoughtParts.map((p: any) => p.text).filter(Boolean).join('\n\n');
             }
 
             // Extract Response Text
+            const responseTexts = contentParts.map((p: any) => p.text).filter(Boolean);
             let responseContent = "";
-            if (contentParts.length > 0) {
-                responseContent = contentParts.map((p: any) => p.text).join('\n\n');
+            if (responseTexts.length > 0) {
+                responseContent = responseTexts.join('\n\n');
             } else if (thoughtParts.length > 0) {
                  responseContent = "(Thinking process only, no final response generated)";
             } else {
@@ -117,7 +162,7 @@ export class GeminiApiClient {
 
             // Extract Thought Signature
             let thoughtSignature: string | undefined;
-            for (const part of content.parts) {
+            for (const part of responseParts) {
                 if (part.thoughtSignature) {
                     thoughtSignature = part.thoughtSignature;
                     break; 
@@ -132,17 +177,19 @@ export class GeminiApiClient {
             return {
                 role: 'model',
                 content: responseContent,
-                parts: content.parts, 
+                parts: responseParts,
                 thought: thoughtText,
                 thoughtSignature: thoughtSignature,
                 usageMetadata: usageMetadata,
                 groundingMetadata: groundingMetadata
             };
         } else {
+            const blockReason = data.promptFeedback?.blockReason;
+            const blockMessage = blockReason ? ` (blocked: ${blockReason})` : "";
             return {
                 role: 'model',
-                content: "(No response content generated)",
-                parts: [{ text: "(No response content generated)" }]
+                content: `(No response content generated${blockMessage})`,
+                parts: [{ text: `(No response content generated${blockMessage})` }]
             };
         }
     }
@@ -156,7 +203,7 @@ export class GeminiApiClient {
             method: 'POST',
             headers: {
                 'Content-Type': 'application/json',
-                'x-goog-api-key': apiKey
+                'x-goog-api-key': apiKey.trim()
             },
             body: JSON.stringify({ contents: contents }),
             throw: false
@@ -207,7 +254,7 @@ export class GeminiApiClient {
                 return `[${i + 1}]`;
             });
 
-            const citationString = " " + citationLinks.join(""); 
+            const citationString = " " + citationLinks.join("");
             
             if (endIndex <= newText.length) {
                  newText = newText.slice(0, endIndex) + citationString + newText.slice(endIndex);

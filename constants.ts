@@ -2,7 +2,7 @@ import { GeminiPluginSettings } from "./types";
 
 export const DEFAULT_SETTINGS: GeminiPluginSettings = {
     apiKey: '',
-    modelName: 'gemini-3-pro-preview',
+    modelName: 'gemini-3.5-flash',
     thinkingLevel: 'high',
     enableThinking: false,
     chatHistoryFolder: 'Gemini Chats',
@@ -14,9 +14,10 @@ export const DEFAULT_SETTINGS: GeminiPluginSettings = {
 export const VIEW_TYPE_GEMINI_CHAT = 'gemini-chat-view';
 
 export const GEMINI_MODELS = [
-    { id: 'gemini-3-pro-preview', name: 'Gemini 3 Pro' },
-    { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash' },
-    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
+    { id: 'gemini-3.1-pro-preview', name: 'Gemini 3.1 Pro Preview' },
+    { id: 'gemini-3-flash-preview', name: 'Gemini 3 Flash Preview' },
+    { id: 'gemini-3.5-flash', name: 'Gemini 3.5 Flash' },
     { id: 'gemini-2.5-flash', name: 'Gemini 2.5 Flash' },
+    { id: 'gemini-2.5-pro', name: 'Gemini 2.5 Pro' },
     { id: 'gemini-2.5-flash-lite', name: 'Gemini 2.5 Flash Lite' }
 ];

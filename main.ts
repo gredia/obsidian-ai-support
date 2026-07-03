@@ -1,5 +1,5 @@
-import { App, ItemView, MarkdownRenderer, Notice, Plugin, PluginSettingTab, Setting, WorkspaceLeaf, setIcon, ButtonComponent, TextAreaComponent, TFile, DropdownComponent } from 'obsidian';
-import { NoteService } from './note-service';
+import { App, ItemView, MarkdownRenderer, Notice, Plugin, PluginSettingTab, Setting, WorkspaceLeaf, setIcon, ButtonComponent, TextAreaComponent, TFile, DropdownComponent, TFolder, normalizePath } from 'obsidian';
+import { NoteService, extractWikiLinkTargets } from './note-service';
 import { ChatHistoryService } from './chat-history-service';
 import { ChatHistoryModal } from './chat-history-modal';
 import { FileSuggestModal } from './file-suggest-modal';
@@ -90,6 +90,23 @@ export default class GeminiPlugin extends Plugin {
 
 	async loadSettings() {
 		this.settings = Object.assign({}, DEFAULT_SETTINGS, await this.loadData());
+        let changed = false;
+        if (!GEMINI_MODELS.some(model => model.id === this.settings.modelName)) {
+            console.warn(`Gemini: Unknown saved model "${this.settings.modelName}". Falling back to ${DEFAULT_SETTINGS.modelName}.`);
+            this.settings.modelName = DEFAULT_SETTINGS.modelName;
+            changed = true;
+        }
+        if (!['minimal', 'low', 'medium', 'high'].includes(this.settings.thinkingLevel)) {
+            this.settings.thinkingLevel = DEFAULT_SETTINGS.thinkingLevel;
+            changed = true;
+        }
+        if (!['auto', 'low', 'medium', 'high'].includes(this.settings.mediaResolution)) {
+            this.settings.mediaResolution = DEFAULT_SETTINGS.mediaResolution;
+            changed = true;
+        }
+        if (changed) {
+            await this.saveSettings();
+        }
 	}
 
 	async saveSettings() {
@@ -298,10 +315,10 @@ class GeminiChatView extends ItemView {
 
         // Visibility logic
         const updateThinkingVisibility = (model: string) => {
-            if (model.includes('gemini-3')) {
-                this.thinkingToggleBtn.style.display = 'none';
-            } else {
+            if (model.includes('gemini-2.5')) {
                 this.thinkingToggleBtn.style.display = 'flex';
+            } else {
+                this.thinkingToggleBtn.style.display = 'none';
             }
         };
         updateThinkingVisibility(this.currentModel);
@@ -376,23 +393,37 @@ class GeminiChatView extends ItemView {
         }
     }
 
+    private async ensureFolder(folderPath: string): Promise<void> {
+        const normalizedFolder = normalizePath(folderPath);
+        const existing = this.app.vault.getAbstractFileByPath(normalizedFolder);
+        if (existing instanceof TFolder) {
+            return;
+        }
+        if (existing) {
+            throw new Error(`Path exists and is not a folder: ${normalizedFolder}`);
+        }
+
+        const segments = normalizedFolder.split("/").filter(Boolean);
+        let currentPath = "";
+        for (const segment of segments) {
+            currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+            const current = this.app.vault.getAbstractFileByPath(currentPath);
+            if (current instanceof TFolder) {
+                continue;
+            }
+            if (current) {
+                throw new Error(`Path exists and is not a folder: ${currentPath}`);
+            }
+            await this.app.vault.createFolder(currentPath);
+        }
+    }
+
     async handleImagePaste(buffer: ArrayBuffer, mimeType: string) {
         const extension = mimeType.split('/')[1] || 'png';
         const dateStr = new Date().toISOString().replace(/[:\.]/g, "-").slice(0, 19);
         const baseName = `Pasted Image ${dateStr}`;
-        const folderPath = `${this.plugin.settings.chatHistoryFolder}/Attachments`;
+        const folderPath = normalizePath(`${this.plugin.settings.chatHistoryFolder}/Attachments`);
 
-        if (!this.app.vault.getAbstractFileByPath(folderPath)) {
-            try {
-                await this.app.vault.createFolder(folderPath);
-            } catch (e) {
-                if (!this.app.vault.getAbstractFileByPath(this.plugin.settings.chatHistoryFolder)) {
-                     await this.app.vault.createFolder(this.plugin.settings.chatHistoryFolder);
-                }
-                await this.app.vault.createFolder(folderPath);
-            }
-        }
-        
         let fileName = `${baseName}.${extension}`;
         let filePath = `${folderPath}/${fileName}`;
         let counter = 1;
@@ -403,6 +434,7 @@ class GeminiChatView extends ItemView {
         }
         
         try {
+            await this.ensureFolder(folderPath);
             const file = await this.app.vault.createBinary(filePath, buffer);
             this.addContextFile(file);
             new Notice(`Image pasted: ${fileName}`);
@@ -517,7 +549,7 @@ class GeminiChatView extends ItemView {
 		const text = this.inputTextArea.getValue().trim();
 		if (!text && this.contextFiles.length === 0 && !this.isActiveContextEnabled) return;
 
-		if (!this.plugin.settings.apiKey) {
+		if (!this.plugin.settings.apiKey.trim()) {
 			new Notice('Please set your Gemini API Key in settings.');
 			return;
 		}
@@ -557,21 +589,7 @@ class GeminiChatView extends ItemView {
 			parts: [],
             images: imagePaths
 		};
-		this.addMessage(userMsg);
-        this.history.push(userMsg);
-        
-        this.chatHistoryService.appendMessage(
-            this.plugin.settings.chatHistoryFolder,
-            this.currentChatFile, // null if new
-            userMsg,
-            (this.currentChatFile === null && this.history.length === 1) ? text : undefined
-        ).then(file => {
-            this.currentChatFile = file;
-            const titleEl = this.headerContainer.querySelector('.gemini-chat-title');
-            if (titleEl && this.currentChatFile) {
-                titleEl.setText(this.currentChatFile.replace(/\.md$/, ''));
-            }
-        }).catch(err => console.error("Failed to save chat:", err));
+        this.addMessage(userMsg);
 
         // Capture selected files (no longer clearing context to persist selection)
         const selectedFiles = [...this.contextFiles];
@@ -591,6 +609,14 @@ class GeminiChatView extends ItemView {
             const messageParts: any[] = [];
             let contextText = "";
             let cachedContentName: string | undefined = undefined;
+            let validFileUris: Set<string> | undefined;
+
+            if (this.history.some(msg => msg.parts?.some((part: any) => part.file_data?.file_uri))) {
+                const remoteFileUris = await this.fileManager.validateRemoteFiles(this.plugin.settings.apiKey);
+                if (remoteFileUris) {
+                    validFileUris = remoteFileUris;
+                }
+            }
 
             // --- 1. Collect & Deduplicate Files ---
             const filesToProcess: TFile[] = [];
@@ -623,6 +649,7 @@ class GeminiChatView extends ItemView {
                 const file = mediaFiles[i];
                 try {
                     const fileUri = await this.fileManager.uploadFile(file, this.plugin.settings.apiKey);
+                    validFileUris?.add(fileUri);
                     const mimeType = this.fileManager.getMimeType(file.extension) || 'application/octet-stream';
                     
                     let useExplicitCache = false;
@@ -654,11 +681,6 @@ class GeminiChatView extends ItemView {
                             }
                         };
 
-                        if (this.currentModel.includes('gemini-3') && this.plugin.settings.mediaResolution !== 'auto') {
-                            part.media_resolution = {
-                                level: `media_resolution_${this.plugin.settings.mediaResolution}`
-                            };
-                        }
                         messageParts.push(part);
                     } else {
                         // If using explicit cache, the file is already in the cache context.
@@ -687,13 +709,10 @@ class GeminiChatView extends ItemView {
             }
 
             if (text) {
-                const linkRegex = /\\\[\[([^\]]+)\]\]/g;
-                const matches = Array.from(text.matchAll(linkRegex));
-                if (matches.length > 0) {
-                    new Notice(`Reading ${matches.length} linked text note(s)...`);
-                    for (const match of matches) {
-                        const linkContent = match[1];
-                        const cleanLink = linkContent.split('|')[0];
+                const linkedNoteTargets = extractWikiLinkTargets(text);
+                if (linkedNoteTargets.length > 0) {
+                    new Notice(`Reading ${linkedNoteTargets.length} linked text note(s)...`);
+                    for (const cleanLink of linkedNoteTargets) {
                         const resolution = await this.noteService.resolveNoteFile(cleanLink);
                         if (resolution.type === 'resolved') {
                             const content = await this.noteService.readNoteText(resolution.file);
@@ -713,6 +732,19 @@ class GeminiChatView extends ItemView {
             }
 
             userMsg.parts = messageParts;
+            this.history.push(userMsg);
+
+            const savedUserFile = await this.chatHistoryService.appendMessage(
+                this.plugin.settings.chatHistoryFolder,
+                this.currentChatFile,
+                userMsg,
+                (this.currentChatFile === null && this.history.length === 1) ? text : undefined
+            );
+            this.currentChatFile = savedUserFile;
+            const titleEl = this.headerContainer.querySelector('.gemini-chat-title');
+            if (titleEl && this.currentChatFile) {
+                titleEl.setText(this.currentChatFile.replace(/\.md$/, ''));
+            }
 
             const responseMsg = await this.apiClient.generateContent(
                 this.history, 
@@ -720,7 +752,8 @@ class GeminiChatView extends ItemView {
                 this.plugin.settings,
                 this.abortController.signal,
                 cachedContentName,
-                this.isThinkingEnabled // Pass the UI state override
+                this.isThinkingEnabled,
+                validFileUris
             );
 
 			loadingEl.remove();
@@ -820,6 +853,16 @@ class GeminiChatView extends ItemView {
 			this
 		);
 
+        msgEl.querySelectorAll('a.internal-link').forEach(link => {
+            link.addEventListener('click', (event) => {
+                event.preventDefault();
+                const target = link.getAttribute('data-href') || link.getAttribute('href');
+                if (target) {
+                    this.app.workspace.openLinkText(target, '', false);
+                }
+            });
+        });
+
         if (msg.groundingMetadata) {
             const groundingEl = msgEl.createDiv({ cls: 'gemini-chat-grounding', attr: { style: 'margin-top: 10px; padding-top: 10px; border-top: 1px solid var(--background-modifier-border); font-size: 0.85em;' } });
             
@@ -892,27 +935,27 @@ class GeminiSettingTab extends PluginSettingTab {
 		new Setting(containerEl)
 			.setName('Default Model Name')
 			.setDesc('The default Gemini model for new chats.')
-			.addDropdown(dropdown => dropdown
-                .addOption('gemini-3-pro-preview', 'Gemini 3 Pro Preview')
-                .addOption('gemini-3-flash-preview', 'Gemini 3 Flash Preview')
-                .addOption('gemini-2.5-pro', 'Gemini 2.5 Pro')
-                .addOption('gemini-2.5-flash', 'Gemini 2.5 Flash')
-                .addOption('gemini-2.5-flash-lite', 'Gemini 2.5 Flash Lite')
-				.setValue(this.plugin.settings.modelName)
-				.onChange(async (value) => {
-					this.plugin.settings.modelName = value;
-					await this.plugin.saveSettings();
-				}));
+			.addDropdown(dropdown => {
+                GEMINI_MODELS.forEach(model => dropdown.addOption(model.id, model.name));
+                dropdown
+                    .setValue(this.plugin.settings.modelName)
+                    .onChange(async (value) => {
+                        this.plugin.settings.modelName = value;
+                        await this.plugin.saveSettings();
+                    });
+            });
 
 		new Setting(containerEl)
-			.setName('Thinking Level (Gemini 3)')
-			.setDesc('Controls the depth of reasoning. "High" is default for Gemini 3 Pro.')
+			.setName('Thinking Level (Gemini 3 and newer)')
+			.setDesc('Controls the maximum reasoning depth for Gemini 3 and newer models.')
 			.addDropdown(dropdown => dropdown
-				.addOption('high', 'High')
+				.addOption('minimal', 'Minimal')
 				.addOption('low', 'Low')
+				.addOption('medium', 'Medium')
+				.addOption('high', 'High')
 				.setValue(this.plugin.settings.thinkingLevel)
 				.onChange(async (value) => {
-					this.plugin.settings.thinkingLevel = value as 'low' | 'high';
+					this.plugin.settings.thinkingLevel = value as GeminiPluginSettings['thinkingLevel'];
 					await this.plugin.saveSettings();
 				}));
 
@@ -958,17 +1001,18 @@ class GeminiSettingTab extends PluginSettingTab {
                 }));
 
         new Setting(containerEl)
-            .setName('Media Resolution (Gemini 3)')
-            .setDesc('Control resolution for Images and PDFs. High consumes more tokens but improves detail/OCR. Auto uses model defaults.')
+            .setName('Media Resolution')
+            .setDesc('Controls token budget for images, videos, and PDFs. Higher values may improve detail but cost more.')
             .addDropdown(dropdown => dropdown
-                .addOption('auto', 'Auto (Default)')
+                .addOption('auto', 'Auto')
                 .addOption('low', 'Low')
                 .addOption('medium', 'Medium')
                 .addOption('high', 'High')
                 .setValue(this.plugin.settings.mediaResolution)
                 .onChange(async (value) => {
-                    this.plugin.settings.mediaResolution = value as 'auto' | 'low' | 'medium' | 'high';
+                    this.plugin.settings.mediaResolution = value as GeminiPluginSettings['mediaResolution'];
                     await this.plugin.saveSettings();
                 }));
+
 	}
 }

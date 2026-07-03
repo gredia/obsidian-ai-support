@@ -1,7 +1,7 @@
 {
 	"name": "obsidian-gemini-copilot",
 	"version": "1.0.0",
-	"description": "This is a sample plugin for Obsidian (https://obsidian.md)",
+	"description": "An Obsidian plugin for chatting with Gemini using notes, PDFs, images, and other vault files.",
 	"main": "main.js",
 	"scripts": {
 		"dev": "node esbuild.config.mjs",

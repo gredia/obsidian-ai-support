@@ -45,11 +45,7 @@ export class ChatHistoryService {
 
     async saveChat(folderPath: string, messages: ChatMessage[], fileName?: string, firstUserMessageContent?: string): Promise<string> {
         const normalizedFolder = normalizePath(folderPath);
-        
-        // Ensure folder exists
-        if (!this.app.vault.getAbstractFileByPath(normalizedFolder)) {
-            await this.app.vault.createFolder(normalizedFolder);
-        }
+        await this.ensureFolder(normalizedFolder);
 
         const chatContent = this.formatChatContent(messages);
         
@@ -64,6 +60,10 @@ export class ChatHistoryService {
             let baseName = "";
             if (firstUserMessageContent) {
                 baseName = this.sanitizeFilename(firstUserMessageContent);
+                if (!baseName) {
+                    const dateStr = new Date().toISOString().replace(/[:\.]/g, "-").slice(0, 19);
+                    baseName = `Chat ${dateStr}`;
+                }
                 if (baseName.length > 50) {
                     baseName = baseName.substring(0, 50) + "...";
                 }
@@ -101,11 +101,7 @@ export class ChatHistoryService {
 
     async appendMessage(folderPath: string, fileName: string | null, message: ChatMessage, firstUserMessageContent?: string): Promise<string> {
         const normalizedFolder = normalizePath(folderPath);
-        
-        // Ensure folder exists
-        if (!this.app.vault.getAbstractFileByPath(normalizedFolder)) {
-            await this.app.vault.createFolder(normalizedFolder);
-        }
+        await this.ensureFolder(normalizedFolder);
 
         let targetFile: TFile | null = null;
         if (fileName) {
@@ -127,6 +123,31 @@ export class ChatHistoryService {
     private sanitizeFilename(name: string): string {
         // Remove invalid characters for filenames and replace spaces with dashes
         return name.replace(/[\\/:*?"<>|]/g, '').replace(/\s/g, ' ').trim();
+    }
+
+    private async ensureFolder(folderPath: string): Promise<void> {
+        const normalizedFolder = normalizePath(folderPath);
+        const existing = this.app.vault.getAbstractFileByPath(normalizedFolder);
+        if (existing instanceof TFolder) {
+            return;
+        }
+        if (existing) {
+            throw new Error(`Path exists and is not a folder: ${normalizedFolder}`);
+        }
+
+        const segments = normalizedFolder.split("/").filter(Boolean);
+        let currentPath = "";
+        for (const segment of segments) {
+            currentPath = currentPath ? `${currentPath}/${segment}` : segment;
+            const current = this.app.vault.getAbstractFileByPath(currentPath);
+            if (current instanceof TFolder) {
+                continue;
+            }
+            if (current) {
+                throw new Error(`Path exists and is not a folder: ${currentPath}`);
+            }
+            await this.app.vault.createFolder(currentPath);
+        }
     }
 
     private generateNoteContent(chatContent: string): string {
@@ -157,8 +178,7 @@ ${chatContent}`;
         if (Object.keys(metadata).length > 0) {
                 // Base64 encode to avoid conflict with markdown syntax or comment terminators
                 const json = JSON.stringify(metadata);
-                // Simple masking to prevent accidental comment closure "-->" inside json
-                const b64 = btoa(unescape(encodeURIComponent(json)));
+                const b64 = this.encodeBase64Utf8(json);
                 textContent += `\n<!-- gemini-metadata: ${b64} -->`;
         }
         
@@ -199,7 +219,7 @@ ${chatContent}`;
             if (metadataMatch) {
                 try {
                     const b64 = metadataMatch[1];
-                    const json = decodeURIComponent(escape(atob(b64)));
+                    const json = this.decodeBase64Utf8(b64);
                     const metadata = JSON.parse(json);
                     
                     if (metadata.parts) parts = metadata.parts;
@@ -227,5 +247,23 @@ ${chatContent}`;
         }
 
         return messages;
+    }
+
+    private encodeBase64Utf8(value: string): string {
+        const bytes = new TextEncoder().encode(value);
+        let binary = "";
+        for (const byte of bytes) {
+            binary += String.fromCharCode(byte);
+        }
+        return btoa(binary);
+    }
+
+    private decodeBase64Utf8(value: string): string {
+        const binary = atob(value);
+        const bytes = new Uint8Array(binary.length);
+        for (let index = 0; index < binary.length; index += 1) {
+            bytes[index] = binary.charCodeAt(index);
+        }
+        return new TextDecoder().decode(bytes);
     }
 }

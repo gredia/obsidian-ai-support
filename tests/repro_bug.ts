@@ -73,10 +73,10 @@ class TestGeminiChatView {
 
         // ... visibility logic
         const updateThinkingVisibility = (model: string) => {
-            if (model.includes('gemini-3')) {
-                this.thinkingToggleBtn.style.display = 'none';
-            } else {
+            if (model.includes('gemini-2.5')) {
                 this.thinkingToggleBtn.style.display = 'flex';
+            } else {
+                this.thinkingToggleBtn.style.display = 'none';
             }
         };
         updateThinkingVisibility(this.currentModel);
@@ -109,6 +109,12 @@ async function runTests() {
          console.error(`FAIL: Icon should be "brain-circuit", got "${view.thinkingToggleBtn.icon}"`);
     } else {
          console.log('PASS: Icon is "brain-circuit"');
+    }
+
+    if (view.thinkingToggleBtn.style.display !== 'flex') {
+        console.error(`FAIL: Gemini 2.5 thinking toggle should be visible, got "${view.thinkingToggleBtn.style.display}"`);
+    } else {
+        console.log('PASS: Gemini 2.5 thinking toggle is visible');
     }
 
 

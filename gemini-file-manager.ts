@@ -23,6 +23,10 @@ export class GeminiFileManager {
         this.app = app;
     }
 
+    private getFileCacheKey(file: TFile, apiKey: string): string {
+        return `${apiKey.trim()}::${file.path}`;
+    }
+
     private getHeader(headers: Record<string, string>, key: string): string | undefined {
         const lowerKey = key.toLowerCase();
         for (const k in headers) {
@@ -36,7 +40,9 @@ export class GeminiFileManager {
     async uploadFile(file: TFile, apiKey: string): Promise<string> {
         // --- Cache Check ---
         const now = Date.now();
-        const cached = this.fileCache.get(file.path);
+        const cleanApiKey = apiKey.trim();
+        const fileCacheKey = this.getFileCacheKey(file, cleanApiKey);
+        const cached = this.fileCache.get(fileCacheKey);
 
         if (cached) {
             // Check if file has been modified since upload
@@ -65,8 +71,6 @@ export class GeminiFileManager {
         }
 
         const displayName = file.basename;
-        const cleanApiKey = apiKey.trim();
-
         // 1. Initial Resumable Request
         // Use v1beta for upload as per standard Gemini Files API
         const initialUrl = `https://generativelanguage.googleapis.com/upload/v1beta/files`;
@@ -122,7 +126,7 @@ export class GeminiFileManager {
             await this.waitForProcessing(fileName, cleanApiKey);
 
             // --- Update Cache ---
-            this.fileCache.set(file.path, {
+            this.fileCache.set(fileCacheKey, {
                 uri: fileUri,
                 mtime: file.stat.mtime,
                 uploadTime: Date.now()
@@ -151,7 +155,7 @@ export class GeminiFileManager {
     ): Promise<string | null> {
         // Cache key should now include tool usage as it changes the cache definition
         const toolKey = `${settings.enableGoogleSearch ? 'G' : ''}${settings.enableUrlContext ? 'U' : ''}`;
-        const cacheKey = `${file.path}::${modelName}::${toolKey}`;
+        const cacheKey = `${apiKey.trim()}::${file.path}::${modelName}::${toolKey}`;
         
         const cached = this.explicitCache.get(cacheKey);
         
@@ -209,7 +213,7 @@ export class GeminiFileManager {
                 method: 'POST',
                 headers: {
                     'Content-Type': 'application/json',
-                    'x-goog-api-key': apiKey
+                    'x-goog-api-key': apiKey.trim()
                 },
                 body: JSON.stringify(body),
                 throw: false // Handle errors manually
@@ -249,41 +253,44 @@ export class GeminiFileManager {
 
     async waitForProcessing(fileName: string, apiKey: string): Promise<void> {
         const url = `https://generativelanguage.googleapis.com/v1beta/${fileName}`;
+        const cleanApiKey = apiKey.trim();
         let state = 'PROCESSING';
         
         // Poll for up to 60 seconds (video processing can take time)
         for (let i = 0; i < 12; i++) {
+            let data: any;
             try {
                 const response = await requestUrl({
                     url: url,
                     method: 'GET',
-                    headers: { 'x-goog-api-key': apiKey }
+                    headers: { 'x-goog-api-key': cleanApiKey }
                 });
                 
                 if (response.status >= 400) {
-                    throw new Error(`Failed to check file state: ${response.status}`);
+                    console.warn(`Failed to check file state (attempt ${i + 1}): ${response.status}`);
+                    await new Promise(resolve => setTimeout(resolve, 5000));
+                    continue;
                 }
 
-                const data = response.json;
-                state = data.state || 'PROCESSING'; // Default to processing if not set
-
-                console.log(`File ${fileName} state: ${state}`);
-
-                if (state === 'ACTIVE') {
-                    return; // Ready!
-                } else if (state === 'FAILED') {
-                    throw new Error(`File processing failed: ${data.error?.message || 'Unknown error'}`);
-                }
-
-                // Wait 5 seconds before next check
-                await new Promise(resolve => setTimeout(resolve, 5000));
+                data = response.json;
             } catch (e) {
                 console.warn(`Error checking file state (attempt ${i+1}):`, e);
-                // Continue retrying unless it's a fatal error? 
-                // If 404 maybe wait? If 403? 
-                // For now, just wait and retry.
                 await new Promise(resolve => setTimeout(resolve, 5000));
+                continue;
             }
+
+            state = data.state || 'PROCESSING'; // Default to processing if not set
+
+            console.log(`File ${fileName} state: ${state}`);
+
+            if (state === 'ACTIVE') {
+                return; // Ready!
+            } else if (state === 'FAILED') {
+                throw new Error(`File processing failed: ${data.error?.message || 'Unknown error'}`);
+            }
+
+            // Wait 5 seconds before next check
+            await new Promise(resolve => setTimeout(resolve, 5000));
         }
         
         throw new Error('File processing timed out. Please try again later.');
@@ -309,12 +316,12 @@ export class GeminiFileManager {
             'json': 'application/json',
             'mp3': 'audio/mpeg',
             'wav': 'audio/wav',
-            'aac': 'audio/wav', // mime type varies
+            'aac': 'audio/aac',
             'mp4': 'video/mp4',
             'mpeg': 'video/mpeg',
             'mov': 'video/quicktime',
             'avi': 'video/x-msvideo',
-            'flv': 'video/x-msvideo',
+            'flv': 'video/x-flv',
             'mpg': 'video/mpeg',
             'webm': 'video/webm',
             'wmv': 'video/x-ms-wmv',
@@ -336,5 +343,53 @@ export class GeminiFileManager {
     isImage(file: TFile): boolean {
         const mime = this.getMimeType(file.extension);
         return mime ? mime.startsWith('image/') : false;
+    }
+
+    async validateRemoteFiles(apiKey: string): Promise<Set<string> | null> {
+        const cleanApiKey = apiKey.trim();
+        const remoteUris = new Set<string>();
+        let pageToken = "";
+
+        try {
+            for (let page = 0; page < 10; page += 1) {
+                const tokenParam = pageToken ? `&pageToken=${encodeURIComponent(pageToken)}` : "";
+                const response = await requestUrl({
+                    url: `https://generativelanguage.googleapis.com/v1beta/files?pageSize=100${tokenParam}`,
+                    method: 'GET',
+                    headers: { 'x-goog-api-key': cleanApiKey },
+                    throw: false
+                });
+
+                if (response.status >= 400) {
+                    console.warn(`Gemini: Failed to list files for cache validation: ${response.status}`);
+                    return null;
+                }
+
+                const data = response.json;
+                for (const file of data.files || []) {
+                    if (file.uri) {
+                        remoteUris.add(file.uri);
+                    }
+                }
+
+                pageToken = data.nextPageToken || "";
+                if (!pageToken) {
+                    break;
+                }
+            }
+
+            const apiKeyPrefix = `${cleanApiKey}::`;
+            for (const [cacheKey, cached] of this.fileCache.entries()) {
+                if (cacheKey.startsWith(apiKeyPrefix) && !remoteUris.has(cached.uri)) {
+                    console.log(`Gemini: Removing stale file cache entry ${cacheKey}`);
+                    this.fileCache.delete(cacheKey);
+                }
+            }
+
+            return remoteUris;
+        } catch (error) {
+            console.error("Gemini: Remote file validation failed:", error);
+            return null;
+        }
     }
 }

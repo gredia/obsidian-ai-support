@@ -1,7 +1,7 @@
 export interface GeminiPluginSettings {
     apiKey: string;
     modelName: string;
-    thinkingLevel: 'low' | 'high';
+    thinkingLevel: 'minimal' | 'low' | 'medium' | 'high';
     enableThinking: boolean; // For Gemini 2.5 models
     chatHistoryFolder: string;
     enableGoogleSearch: boolean;
