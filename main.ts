@@ -1,6 +1,7 @@
 import { App, ItemView, MarkdownRenderer, Notice, Plugin, PluginSettingTab, Setting, WorkspaceLeaf, setIcon, ButtonComponent, TextAreaComponent, TFile, DropdownComponent, TFolder, normalizePath } from 'obsidian';
 import { NoteService, extractWikiLinkTargets } from './note-service';
 import { ChatHistoryService } from './chat-history-service';
+import { buildChatHistoryTitleContext } from './chat-history-title';
 import { ChatHistoryModal } from './chat-history-modal';
 import { FileSuggestModal } from './file-suggest-modal';
 import { GeminiFileManager } from './gemini-file-manager';
@@ -642,6 +643,14 @@ class GeminiChatView extends ItemView {
             const mediaFiles = filesToProcess.filter(f => this.fileManager.isMediaFile(f));
             const textFiles = filesToProcess.filter(f => !this.fileManager.isMediaFile(f));
 
+            const titleFiles = [...selectedFiles];
+            if (this.isActiveContextEnabled && activeFile && !titleFiles.some(file => file.path === activeFile.path)) {
+                titleFiles.push(activeFile);
+            }
+            const initialTitleContext = this.currentChatFile === null && this.history.length === 0
+                ? buildChatHistoryTitleContext(text, titleFiles.map(file => file.name))
+                : undefined;
+
             // Process Media Files (Upload & Cache)
             // Strategy: Try to explicitly cache the FIRST media file. 
             // If successful, use it as cachedContent. Subsequent files are standard file_data.
@@ -738,7 +747,7 @@ class GeminiChatView extends ItemView {
                 this.plugin.settings.chatHistoryFolder,
                 this.currentChatFile,
                 userMsg,
-                (this.currentChatFile === null && this.history.length === 1) ? text : undefined
+                initialTitleContext
             );
             this.currentChatFile = savedUserFile;
             const titleEl = this.headerContainer.querySelector('.gemini-chat-title');

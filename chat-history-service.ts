@@ -1,4 +1,11 @@
 import { App, TFile, TFolder, normalizePath, Notice } from "obsidian";
+import {
+    ChatHistoryTitleContext,
+    buildChatHistoryTitleContext,
+    findNextChatHistorySequence,
+    formatChatHistoryBaseName,
+    formatChatHistoryDate
+} from "./chat-history-title";
 
 export interface ChatMessage {
     role: "user" | "model";
@@ -43,7 +50,12 @@ export class ChatHistoryService {
         }
     }
 
-    async saveChat(folderPath: string, messages: ChatMessage[], fileName?: string, firstUserMessageContent?: string): Promise<string> {
+    async saveChat(
+        folderPath: string,
+        messages: ChatMessage[],
+        fileName?: string,
+        titleContext?: ChatHistoryTitleContext
+    ): Promise<string> {
         const normalizedFolder = normalizePath(folderPath);
         await this.ensureFolder(normalizedFolder);
 
@@ -56,30 +68,10 @@ export class ChatHistoryService {
             targetPath = normalizePath(`${normalizedFolder}/${fileName}`);
             targetFile = this.app.vault.getAbstractFileByPath(targetPath) as TFile;
         } else {
-            // Generate new filename based on first user message content or timestamp
-            let baseName = "";
-            if (firstUserMessageContent) {
-                baseName = this.sanitizeFilename(firstUserMessageContent);
-                if (!baseName) {
-                    const dateStr = new Date().toISOString().replace(/[:\.]/g, "-").slice(0, 19);
-                    baseName = `Chat ${dateStr}`;
-                }
-                if (baseName.length > 50) {
-                    baseName = baseName.substring(0, 50) + "...";
-                }
-                // Ensure uniqueness if a file with this name already exists
-                let counter = 0;
-                let uniqueBaseName = baseName;
-                while (this.app.vault.getAbstractFileByPath(normalizePath(`${normalizedFolder}/${uniqueBaseName}.md`))) {
-                    counter++;
-                    uniqueBaseName = `${baseName}-${counter}`;
-                }
-                baseName = uniqueBaseName;
-
-            } else {
-                const dateStr = new Date().toISOString().replace(/[:\.]/g, "-").slice(0, 19);
-                baseName = `Chat ${dateStr}`;
-            }
+            const now = new Date();
+            const sequence = this.getNextDailySequence(normalizedFolder, formatChatHistoryDate(now));
+            const context = titleContext ?? buildChatHistoryTitleContext("", []);
+            const baseName = formatChatHistoryBaseName(context, now, sequence);
             targetPath = normalizePath(`${normalizedFolder}/${baseName}.md`);
         }
 
@@ -99,7 +91,12 @@ export class ChatHistoryService {
         }
     }
 
-    async appendMessage(folderPath: string, fileName: string | null, message: ChatMessage, firstUserMessageContent?: string): Promise<string> {
+    async appendMessage(
+        folderPath: string,
+        fileName: string | null,
+        message: ChatMessage,
+        titleContext?: ChatHistoryTitleContext
+    ): Promise<string> {
         const normalizedFolder = normalizePath(folderPath);
         await this.ensureFolder(normalizedFolder);
 
@@ -116,13 +113,20 @@ export class ChatHistoryService {
             return targetFile.name;
         } else {
             // Create New
-            return this.saveChat(folderPath, [message], undefined, firstUserMessageContent);
+            return this.saveChat(folderPath, [message], undefined, titleContext);
         }
     }
 
-    private sanitizeFilename(name: string): string {
-        // Remove invalid characters for filenames and replace spaces with dashes
-        return name.replace(/[\\/:*?"<>|]/g, '').replace(/\s/g, ' ').trim();
+    private getNextDailySequence(folderPath: string, date: string): number {
+        const folder = this.app.vault.getAbstractFileByPath(folderPath);
+        if (!(folder instanceof TFolder)) {
+            return 0;
+        }
+
+        const chatFileNames = folder.children
+            .filter((child): child is TFile => child instanceof TFile && child.extension === "md")
+            .map(child => child.basename);
+        return findNextChatHistorySequence(chatFileNames, date);
     }
 
     private async ensureFolder(folderPath: string): Promise<void> {
